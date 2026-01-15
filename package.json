@@ -1,0 +1,8 @@
+{
+  "name": "meaningfull-ai-preview",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "cloudinary": "^2.5.1"
+  }
+}
