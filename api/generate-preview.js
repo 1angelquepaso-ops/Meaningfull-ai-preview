@@ -65,7 +65,8 @@ function demoImageDataUrl({ variant }) {
       <rect x="330" y="520" rx="18" ry="18" width="140" height="90" fill="#f2f2f5" stroke="#e1e1e6" stroke-width="4"/>
     </g>
     <text x="512" y="170" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="44" fill="#111111" opacity=".92">${escapeXml(title)}</text>
-    <text x="512" y="220" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="22" fill="#444" opacity=".78">Demo preview (billing not connected yet)</text>
+    <text x="512" y="220" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="22" fill="#444" opacity=".78">AI-generated visual preview
+</text>
   </svg>`.trim();
 
   const base64 = Buffer.from(svg, "utf8").toString("base64");
