@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "cloudinary": "^2.5.1"
-  }
+  "cloudinary": "^2.5.1",
+  "openai": "^4.0.0"
 }
