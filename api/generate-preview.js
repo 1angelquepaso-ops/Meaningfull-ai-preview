@@ -1,18 +1,17 @@
 // /api/generate-preview.js
-// Meaningfull™ AI Preview — MVP + Luxury Signature Enforcement
-// Engine: Replicate (default) with OpenAI optional switch
-// SAFE for Shopify + MVP
+// Meaningfull™ AI Preview — MVP (Controlled Luxury + Flexibility)
+// Engine: Replicate (Flux)
+// SAFE for Shopify + Vercel
 
 const Replicate = require("replicate");
-
-// ================= CONFIG =================
-const MAX_GENERATIONS = 2;
-const generationCount = new Map();
-const PREVIEW_ENGINE = (process.env.PREVIEW_ENGINE || "replicate").toLowerCase();
 
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
+
+// ================= CONFIG =================
+const MAX_GENERATIONS = 2;
+const generationCount = new Map();
 
 // ================= CORS =================
 function setCors(res) {
@@ -21,160 +20,151 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ================= NOTES PARSING =================
-function extractAge(notes = "") {
-  const m = String(notes).match(/(\d{1,2})\s*(?:yo|y\/o|years?\s*old)/i);
-  if (!m) return null;
-  const age = Number(m[1]);
-  return Number.isFinite(age) ? age : null;
+// ================= HELPERS =================
+function normalizeStr(s) {
+  return String(s || "").trim().replace(/\s+/g, " ");
+}
+function toLower(s) {
+  return normalizeStr(s).toLowerCase();
 }
 
-function extractColors(notes = "") {
-  const n = String(notes).toLowerCase();
-  const COLORS = [
-    "black","white","gray","grey","ivory","bone",
-    "silver","gold","brass",
-    "navy","blue","beige","cream",
-    "charcoal","stone"
+function inferRecipientGroup(recipient = "", notes = "") {
+  const text = `${recipient} ${notes}`.toLowerCase();
+
+  const female = [
+    "wife","girlfriend","mom","mother","sister","daughter","girl",
+    "woman","women","her","she"
   ];
-  return COLORS.filter(c => new RegExp(`\\b${c}\\b`).test(n));
+  const male = [
+    "husband","boyfriend","dad","father","brother","son","boy",
+    "man","men","him","he"
+  ];
+
+  const isFemale = female.some(k => text.includes(k));
+  const isMale = male.some(k => text.includes(k));
+
+  if (isFemale && !isMale) return "female";
+  if (isMale && !isFemale) return "male";
+  return "neutral";
 }
-
-function buildNotesRules(notes = "") {
-  const raw = String(notes || "");
-  const n = raw.toLowerCase();
-  const hard = [];
-  const avoid = [];
-
-  const age = extractAge(raw);
-  if (age !== null) {
-    if (age <= 12) hard.push("child-safe items only; no adult themes");
-    else hard.push("adult-appropriate items");
-  }
-
-  if (n.includes("no alcohol")) avoid.push("no alcohol");
-  if (n.includes("no chocolate")) avoid.push("no chocolate");
-  if (n.includes("no fragrance")) avoid.push("no fragrance");
-
-  const colors = extractColors(raw);
-  if (colors.length) {
-    hard.push(`color palette must include: ${colors.join(", ")}`);
-  }
-
-  return { raw, hard, avoid, age };
-}
-
-// ================= OPTION MAPS =================
-const OCCASION_MOTIFS = {
-  "Valentines Day": ["romantic tone", "warm emotional styling"],
-  "Birthday": ["celebratory but refined"],
-  "Just Because": ["timeless, non-seasonal feel"],
-};
-
-const RECIPIENT_MOTIFS = {
-  "Partner": ["romantic but elevated"],
-  "Friend": ["neutral, refined"],
-  "Parent": ["warm, premium, timeless"],
-};
-
-const VIBE_STYLE = {
-  "Minimalist": ["clean composition", "neutral tones"],
-  "Luxury": ["high-end editorial feel"],
-  "Surprise me": ["balanced premium styling"],
-};
-
-// ================= BRAND LOCK =================
-const BRAND_RULES = [
-  "high-end luxury lifestyle aesthetic",
-  "editorial product photography",
-  "soft diffused studio lighting",
-  "realistic premium materials",
-  "no logos or branding on items",
-];
-
-const BRAND_NEGATIVE = [
-  "no text",
-  "no logos",
-  "no labels",
-  "no watermarks",
-  "no UI elements",
-];
 
 // ================= PROMPT BUILDER =================
 function buildPrompt({ inputs, tier }) {
-  const notes = buildNotesRules(inputs.notes || "");
-  const isSignature = String(tier).toLowerCase().includes("signature");
-
-  const occasion = OCCASION_MOTIFS[inputs.occasion] || [];
-  const recipient = RECIPIENT_MOTIFS[inputs.recipient] || [];
-  const vibe = VIBE_STYLE[inputs.vibe] || [];
+  const isSignature = String(tier || "").toLowerCase().includes("signature");
+  const recipientGroup = inferRecipientGroup(inputs.recipient || "", inputs.notes || "");
+  const notesText = toLower(inputs.notes || "");
 
   const MUST_INCLUDE = [];
-  const NEGATIVE = [...BRAND_NEGATIVE, ...notes.avoid];
+  const NEGATIVE = [];
 
-  // ---------- TIER ENFORCEMENT ----------
-  let tierLine;
+  // ---------- COLOR / STYLE BY RECIPIENT ----------
+  const PALETTES = {
+    female: "soft ivory, warm beige, blush-neutral accents, subtle gold or brass details",
+    male: "charcoal, black, deep navy, warm gray, brushed metal accents",
+    neutral: "ivory, stone, warm gray, charcoal accents, minimal restrained tones"
+  };
 
+  MUST_INCLUDE.push(`apply a ${recipientGroup} premium palette: ${PALETTES[recipientGroup]}`);
+
+  // ================= HARD DENY LIST (MINIMAL) =================
+  NEGATIVE.push(
+    // Packing / filler
+    "no pillows",
+    "no cushions",
+    "no sachets",
+    "no drawstring bags",
+
+    // Tiny low-value disposables
+    "no sheet masks",
+    "no mini or travel-size skincare",
+    "no hand cream tubes",
+
+    // Cheap candle formats only
+    "no tea lights",
+    "no votive candles",
+
+    // Paper clutter
+    "no loose cards",
+    "no posters",
+    "no unbound prints",
+
+    // Visual junk
+    "no excessive small items",
+    "no decorative padding"
+  );
+
+  // ================= SIGNATURE HERO =================
   if (isSignature) {
-    tierLine = `
-SIGNATURE TIER — HIGH-END LUXURY EDITORIAL:
-- ultra-premium minimalist luxury aesthetic
-- fewer items (maximum 5), each substantial and material-rich
-- include ONE dominant luxury hero object (ceramic, glass, stone, metal, or leather)
-- restrained neutral palette (ivory, bone, charcoal, warm gray, navy, black)
-- generous negative space and calm composition
-- packaging appears heavy, rigid, museum-quality
-- deep visible layering across boxes
-- editorial styling (luxury magazine product shoot)
-`;
-
     MUST_INCLUDE.push(
-      "items must appear physically larger, heavier, and more valuable than Starter tier items"
+      "include ONE dominant modern sculptural lifestyle object as the hero (ceramic, stone, resin, metal, or leather)",
+      "hero object must feel trend-forward, expensive, and gallery-worthy",
+      "all other items must be secondary and smaller"
     );
 
     NEGATIVE.push(
-      "no plush toys",
-      "no novelty figurines",
-      "no party favors",
-      "no cartoonish or cute objects",
-      "no cluttered compositions",
-      "no seasonal props dominating the scene"
+      "no consumable item as hero",
+      "no candle, skincare, fragrance, journal, or self-care item as the primary object",
+      "no spa-kit look",
+      "no cluttered assortment of small consumables"
     );
-  } else {
-    tierLine = `
-STARTER TIER — CURATED:
-- thoughtful, warm, approachable presentation
-- more items allowed, lighter visual weight
-- still premium, but friendly and accessible
-`;
   }
 
+  // ================= CONDITIONAL ALLOWANCES =================
+
+  // Gift shop trinkets
+  MUST_INCLUDE.push(
+    "gift shop trinkets are allowed if premium-looking; limit to ONE small accent item; no plastic novelty"
+  );
+  NEGATIVE.push("no multiple cheap trinkets");
+
+  // Candle sets
+  MUST_INCLUDE.push(
+    "candle sets are allowed; maximum two candles; substantial vessels; premium materials; not tea lights or votives"
+  );
+
+  // Bath bombs / lip balm
+  const selfCareRequested = ["bath","bath bomb","lip balm","self care","self-care"].some(k =>
+    notesText.includes(k)
+  );
+
+  if (!isSignature || recipientGroup === "female" || selfCareRequested) {
+    MUST_INCLUDE.push(
+      "bath bombs or lip balm allowed only as a single small secondary accent; must not dominate"
+    );
+  } else {
+    NEGATIVE.push("no bath bombs", "no lip balm");
+  }
+
+  // Throws / blankets
+  MUST_INCLUDE.push(
+    "throws or blankets allowed only if folded, premium-looking, neutral-toned, and not bed-like"
+  );
+  NEGATIVE.push("no oversized blanket dominating the composition");
+
+  // Soft cosmetic bags — OPEN ONLY
+  MUST_INCLUDE.push(
+    "soft cosmetic bags allowed only if OPEN with contents visible"
+  );
+  NEGATIVE.push(
+    "no closed cosmetic bags",
+    "no zipped cosmetic pouches"
+  );
+
+  // ================= FINAL PROMPT =================
   return `
-High-end photorealistic studio product photography of a premium AI-curated gift box.
+High-end photorealistic studio product photography of a premium AI-curated gift box with contents clearly visible.
 
-${tierLine}
-
-Occasion: ${inputs.occasion}
+Tier: ${tier}
 Recipient: ${inputs.recipient}
-Vibe: ${inputs.vibe}
+Occasion: ${inputs.occasion}
+Vibe: ${inputs.vibe || "Refined"}
 
-STYLE RULES:
-- ${BRAND_RULES.join("; ")}
-
-OCCASION CUES:
-- ${occasion.join("; ")}
-
-RECIPIENT CUES:
-- ${recipient.join("; ")}
-
-VIBE CUES:
-- ${vibe.join("; ")}
-
-HARD CONSTRAINTS:
-- gift box is OPEN with contents visible
-- premium rigid box construction
-- intentional spacing and composition
-- ${notes.hard.join("; ")}
+STYLE:
+- modern premium lifestyle aesthetic
+- editorial product photography
+- intentional composition with negative space
+- realistic materials and textures
+- unbranded items only
 
 MUST INCLUDE:
 - ${MUST_INCLUDE.join("; ")}
@@ -183,15 +173,18 @@ NEGATIVE CONSTRAINTS:
 - ${NEGATIVE.join(", ")}
 
 Notes (user intent):
-${notes.raw || "None"}
+${inputs.notes || "None"}
 `.trim();
 }
 
 // ================= HANDLER =================
 module.exports = async (req, res) => {
   setCors(res);
+
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
     const { inputs, sessionId, tier = "Curated" } = req.body || {};
@@ -206,25 +199,19 @@ module.exports = async (req, res) => {
 
     const prompt = buildPrompt({ inputs, tier });
 
-    let imageUrl;
+    const output = await replicate.run(
+      process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev",
+      {
+        input: {
+          prompt,
+          aspect_ratio: "1:1",
+          output_format: "webp",
+          quality: 90,
+        },
+      }
+    );
 
-    if (PREVIEW_ENGINE === "replicate") {
-      const output = await replicate.run(
-        process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev",
-        {
-          input: {
-            prompt,
-            aspect_ratio: "1:1",
-            output_format: "webp",
-            quality: 90,
-          },
-        }
-      );
-      imageUrl = Array.isArray(output) ? output[0] : output;
-    } else {
-      return res.status(500).json({ error: "OpenAI engine disabled in MVP" });
-    }
-
+    const imageUrl = Array.isArray(output) ? output[0] : output;
     generationCount.set(sessionId, used + 1);
 
     res.status(200).json({
