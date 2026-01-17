@@ -1,13 +1,11 @@
 // /api/generate-preview.js
-// Vercel Serverless Function (Node.js)
+// Vercel Serverless Function (Node.js, CommonJS)
 // Requires: npm i openai
 //
 // Uses OpenAI Image API (gpt-image-1) to generate a premium "editorial hero shot"
 // and (optionally) runs a vision-based validation pass to ensure Anything Else was obeyed.
-//
-// Docs: Image generation guide + API reference :contentReference[oaicite:1]{index=1}
 
-import OpenAI from "openai";
+const OpenAI = require("openai");
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -18,12 +16,14 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const BRAND_KEYWORDS = {
   nike: {
     label: "Nike-inspired athletic style",
-    visual: "athletic footwear/apparel design language, performance textures, sporty accessories, black/white with optional neon accents",
+    visual:
+      "athletic footwear/apparel design language, performance textures, sporty accessories, black/white with optional neon accents",
     // Keep it "inspired", avoid logos by default
   },
   adidas: {
     label: "Adidas-inspired athletic style",
-    visual: "streetwear athletic design language, performance fabrics, sporty accessories, black/white with muted accents",
+    visual:
+      "streetwear athletic design language, performance fabrics, sporty accessories, black/white with muted accents",
   },
   apple: {
     label: "Apple-inspired minimalist tech style",
@@ -86,9 +86,7 @@ const COLOR_KEYWORDS = [
 // ----------------------------
 
 function normalizeStr(s) {
-  return String(s || "")
-    .trim()
-    .replace(/\s+/g, " ");
+  return String(s || "").trim().replace(/\s+/g, " ");
 }
 
 function toLower(s) {
@@ -108,12 +106,10 @@ function extractBrands(anythingElse) {
   // Single-word keys
   for (const k of Object.keys(BRAND_KEYWORDS)) {
     if (k.includes(" ")) continue;
-    // word boundary-ish
     const re = new RegExp(`(^|\\W)${k}(\\W|$)`, "i");
     if (re.test(anythingElse)) found.push(k);
   }
 
-  // Unique
   return Array.from(new Set(found));
 }
 
@@ -137,17 +133,14 @@ function extractColors(anythingElse) {
 }
 
 function inferAgeFromNotes(ageRaw) {
-  // If already numeric, keep it.
   const n = Number(ageRaw);
   if (Number.isFinite(n) && n > 0 && n < 120) return Math.round(n);
 
-  // Try to parse patterns like "10 years old"
   const m = String(ageRaw || "").match(/(\d{1,2})\s*(years?\s*old|yo)\b/i);
   if (m) {
     const v = Number(m[1]);
     if (Number.isFinite(v)) return v;
   }
-
   return null;
 }
 
@@ -164,20 +157,11 @@ function ageBand(age) {
 // 3) Prompt builder (the “money”)
 // ----------------------------
 
-function buildBasePrompt({
-  recipient,
-  occasion,
-  vibe,
-  tier,
-  anythingElse,
-  colors,
-}) {
-  // Tier rules: layers & density
+function buildBasePrompt({ recipient, occasion, vibe, tier, anythingElse, colors }) {
   const isSignature = String(tier || "").toLowerCase().includes("signature");
   const layers = isSignature ? 3 : 2;
   const minItems = isSignature ? "5–6" : "4";
 
-  // Color rule
   const colorLine =
     colors.length > 0
       ? `COLOR PALETTE (HARD OVERRIDE):
@@ -274,9 +258,7 @@ function buildCategoryInjection(categories, age) {
       : "";
 
   const uniqueReqs = Array.from(
-    new Set(
-      categories.map((c) => `- Must include: ${CATEGORY_KEYWORDS[c]} (trigger: "${c}")`)
-    )
+    new Set(categories.map((c) => `- Must include: ${CATEGORY_KEYWORDS[c]} (trigger: "${c}")`))
   );
 
   return `
@@ -312,21 +294,14 @@ function buildFinalPrompt(payload) {
   const cat = buildCategoryInjection(categories, payload.age);
   const tier = buildTierInjection(payload.tier);
 
-  // Final
   return [base, brand, cat, tier].filter(Boolean).join("\n\n");
 }
 
 // ----------------------------
 // 4) Optional vision validator (recommended)
 // ----------------------------
-// This uses the Images & Vision guide style: send image as input_image and ask model to verify.
-// Docs: Images & vision guide :contentReference[oaicite:2]{index=2}
-//
-// Set env var VALIDATE_WITH_VISION="true" to enable (adds cost + a bit of latency).
-// If enabled, we will regenerate once if validation fails.
 
 async function validateWithVision({ imageDataUrl, anythingElse }) {
-  // If no Anything Else, skip strict validation.
   if (!normalizeStr(anythingElse)) return { ok: true, reason: "no_anything_else" };
 
   const mustMention = normalizeStr(anythingElse);
@@ -364,16 +339,13 @@ Return ONLY JSON.
     ],
   });
 
-  // The Responses API returns structured output in output_text; we’ll parse best-effort.
   const text = resp.output_text || "";
   try {
     const jsonStart = text.indexOf("{");
     const jsonEnd = text.lastIndexOf("}");
     const sliced = jsonStart >= 0 && jsonEnd >= 0 ? text.slice(jsonStart, jsonEnd + 1) : text;
-    const parsed = JSON.parse(sliced);
-    return parsed;
+    return JSON.parse(sliced);
   } catch {
-    // If parsing fails, assume not OK (strict)
     return { ok: false, missing: ["validation_parse_error"], notes: text.slice(0, 300) };
   }
 }
@@ -382,7 +354,7 @@ Return ONLY JSON.
 // 5) Main handler
 // ----------------------------
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       res.status(405).json({ error: "Method not allowed. Use POST." });
@@ -409,7 +381,7 @@ export default async function handler(req, res) {
       age: parsedAge,
       occasion,
       vibe,
-      anythingElse,
+      anythingElse: normalizeStr(anythingElse).slice(0, 400), // small safety cap
       tier,
     };
 
@@ -422,8 +394,6 @@ export default async function handler(req, res) {
     while (attempt < maxAttempts) {
       attempt += 1;
 
-      // Generate image with Image API
-      // Docs: Images API reference :contentReference[oaicite:3]{index=3}
       const img = await openai.images.generate({
         model: process.env.IMAGE_MODEL || "gpt-image-1",
         prompt: finalPrompt,
@@ -433,7 +403,6 @@ export default async function handler(req, res) {
         n: 1,
       });
 
-      // Most common return is base64 in b64_json (depending on settings/model)
       const b64 = img?.data?.[0]?.b64_json;
       if (!b64) {
         lastResult = { ok: false, reason: "no_image_data_returned" };
@@ -442,16 +411,14 @@ export default async function handler(req, res) {
 
       const imageDataUrl = `data:image/png;base64,${b64}`;
 
-      // Optional validation
       if (String(process.env.VALIDATE_WITH_VISION || "").toLowerCase() === "true") {
-        const verdict = await validateWithVision({ imageDataUrl, anythingElse });
+        const verdict = await validateWithVision({ imageDataUrl, anythingElse: payload.anythingElse });
         if (!verdict?.ok) {
           lastResult = { ok: false, reason: "vision_validation_failed", verdict };
-          continue; // regenerate
+          continue;
         }
       }
 
-      // Success
       res.status(200).json({
         ok: true,
         attempt,
@@ -460,16 +427,15 @@ export default async function handler(req, res) {
           tier,
           parsedAge,
           extracted: {
-            brands: extractBrands(anythingElse),
-            categories: extractCategories(anythingElse),
-            colors: extractColors(anythingElse),
+            brands: extractBrands(payload.anythingElse),
+            categories: extractCategories(payload.anythingElse),
+            colors: extractColors(payload.anythingElse),
           },
         },
       });
       return;
     }
 
-    // If we reached here, attempts exhausted
     res.status(200).json({
       ok: false,
       error: "Image generation failed validation after max attempts.",
@@ -480,10 +446,11 @@ export default async function handler(req, res) {
     res.status(500).json({
       ok: false,
       error: "Server error generating preview.",
-      details: String(err?.message || err),
+      details: String((err && err.message) || err),
     });
   }
-}
+};
+
 
 
 
