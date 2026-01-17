@@ -61,48 +61,40 @@ const OCCASION_MOTIFS = {
 };
 
 const RECIPIENT_MOTIFS = {
-  "Boyfriend": [
-    "masculine-leaning but not stereotypical",
-    "personal and romantic touches appropriate for boyfriend"
+  "Partner": [
+    "romantic or emotionally warm items depending on vibe",
+    "thoughtful, intimate but tasteful presentation"
   ],
-  "Girlfriend": [
-    "feminine-leaning but not stereotypical",
-    "personal and romantic touches appropriate for girlfriend"
+  "Parent": [
+    "warm, appreciative, comforting items",
+    "sentimental but practical, elevated everyday gifts"
   ],
-  "Husband": [
-    "mature masculine-leaning, refined",
-    "practical + sentimental mix appropriate for husband"
+  "Son": [
+    "child-appropriate, fun, age-aware items",
+    "no adult or romantic themes"
   ],
-  "Wife": [
-    "mature feminine-leaning, refined",
-    "sentimental + elegant touches appropriate for wife"
-  ],
-  "Someone I'm dating": [
-    "early-relationship appropriate (sweet, not too intense)",
-    "polished, safe, thoughtful vibe"
-  ],
-  "Friend": [
-    "friendly, fun, not romantic",
-    "universally likeable items"
+  "Daughter": [
+    "child-appropriate, warm, playful or sentimental items",
+    "no adult or romantic themes"
   ],
   "Sibling": [
-    "playful, casual, inside-joke energy",
-    "fun but still thoughtful"
+    "casual, friendly, non-romantic items",
+    "balanced and age-appropriate"
   ],
-  "Mom": [
-    "warm, caring, elevated comfort vibe",
-    "thoughtful, appreciative touches"
+  "Friend": [
+    "neutral, thoughtful, non-romantic items",
+    "universally appealing presentation"
   ],
-  "Dad": [
-    "warm, practical, classic vibe",
-    "thoughtful, appreciative touches"
+  "Relative": [
+    "safe, family-friendly, neutral items",
+    "avoid romance or intimacy"
   ],
   "My Pet": [
-    "pet-themed items visible",
-    "treats/toys/accessories appropriate for a pet gift",
-    "cute but premium presentation"
+    "pet-related items only",
+    "toys, treats, accessories, playful tone"
   ]
 };
+
 
 // Optional: vibe-to-style tightening (you can expand this later)
 const VIBE_STYLE = {
