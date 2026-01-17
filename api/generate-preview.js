@@ -1,9 +1,5 @@
 // api/generate-preview.js
 // Meaningfull™ AI Preview — Vercel Serverless Function (CommonJS)
-// - Replicate (Flux) image generation
-// - CORS + OPTIONS preflight support (required for Shopify)
-// - Max 2 generations per sessionId (MVP in-memory)
-// - Occasion + Recipient motifs drive item content (Baby shower => baby items, etc.)
 
 const Replicate = require("replicate");
 
@@ -14,11 +10,18 @@ const replicate = new Replicate({
 const MAX_GENERATIONS = 2;
 const generationCount = new Map();
 
-// ✅ Use your exact EasyFlow option text (case/spacing matters)
+function setCors(res) {
+  // MVP: allow all. For launch-hardening change to https://meaningfull.co
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+// ✅ Match your EasyFlow option text EXACTLY (case/spacing)
 const OCCASION_MOTIFS = {
   "Birthday": [
     "birthday-themed items visible",
-    "small celebration accents (balloons, confetti, candles, ribbon)",
+    "small celebration accents (confetti, candles, ribbon)",
     "a greeting card or gift tag vibe"
   ],
   "Christmas": [
@@ -28,13 +31,13 @@ const OCCASION_MOTIFS = {
   ],
   "Halloween": [
     "halloween-themed items visible",
-    "pumpkin/orange/black/purple/green accents, playful spooky horror)",
-    "classic candy simple halloween costume seasonal treats or cozy autumn vibe classic horror movie"
+    "pumpkin/orange/black accents, playful spooky (not horror)",
+    "seasonal treats or cozy autumn vibe"
   ],
   "New Years": [
     "new year celebration feel",
     "sparkle accents, classy festive styling",
-    "midnight celebration vibe gala nightclub"
+    "midnight celebration vibe (not nightclub)"
   ],
   "Baby shower": [
     "baby-themed items visible",
@@ -61,42 +64,64 @@ const OCCASION_MOTIFS = {
 };
 
 const RECIPIENT_MOTIFS = {
-  "Partner": [
-    "romantic or emotionally warm items depending on vibe",
-    "thoughtful, intimate but tasteful presentation"
+  "Boyfriend": [
+    "masculine-leaning but not stereotypical",
+    "personal and romantic touches appropriate for boyfriend"
   ],
-  "Parent": [
-    "warm, appreciative, comforting items",
-    "sentimental but practical, elevated everyday gifts"
+  "Girlfriend": [
+    "feminine-leaning but not stereotypical",
+    "personal and romantic touches appropriate for girlfriend"
   ],
-  "Son": [
-    "child-appropriate, fun, age-aware items",
-    "no adult or romantic themes"
+  "Husband": [
+    "mature masculine-leaning, refined",
+    "practical + sentimental mix appropriate for husband"
   ],
-  "Daughter": [
-    "child-appropriate, warm, playful or sentimental items",
-    "no adult or romantic themes"
+  "Wife": [
+    "mature feminine-leaning, refined",
+    "sentimental + elegant touches appropriate for wife"
   ],
-  "Sibling": [
-    "casual, friendly, non-romantic items",
-    "balanced and age-appropriate"
+  "Someone I'm dating": [
+    "early-relationship appropriate (sweet, not too intense)",
+    "polished, safe, thoughtful vibe"
   ],
   "Friend": [
-    "neutral, thoughtful, non-romantic items",
-    "universally appealing presentation"
+    "friendly, fun, not romantic",
+    "universally likeable items"
   ],
-  "Relative": [
-    "safe, family-friendly, neutral items",
-    "avoid romance or intimacy"
+  "Sibling": [
+    "playful, casual, inside-joke energy",
+    "fun but still thoughtful"
+  ],
+  "Mom": [
+    "warm, caring, elevated comfort vibe",
+    "thoughtful, appreciative touches"
+  ],
+  "Dad": [
+    "warm, practical, classic vibe",
+    "thoughtful, appreciative touches"
   ],
   "My Pet": [
-    "pet-related items only",
-    "toys, treats, accessories, playful tone"
+    "pet-themed items visible",
+    "treats/toys/accessories appropriate for a pet gift",
+    "cute but premium presentation"
   ]
 };
 
+// ✅ Your current tier names (from Shopify variants)
+const TIER_MOTIFS = {
+  "AI Curated Gift": [
+    "a small, thoughtful selection of items (3–5 items clearly visible)",
+    "clean, simple presentation with intentional spacing",
+    "focus on meaning over quantity"
+  ],
+  "AI Signature Gift": [
+    "a fuller, premium assortment of items (6–9 items clearly visible)",
+    "more layers inside the nested box, richer textures and details",
+    "a mix of sentimental and keepsake-quality items"
+  ]
+};
 
-// Optional: vibe-to-style tightening (you can expand this later)
+// Optional vibe tightening
 const VIBE_STYLE = {
   "Minimalist": [
     "minimal, uncluttered composition",
@@ -115,20 +140,11 @@ const VIBE_STYLE = {
   ]
 };
 
-function setCors(res) {
-  // MVP: allow all origins. For launch-hardening you can change to https://meaningfull.co
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-
 module.exports = async (req, res) => {
   setCors(res);
 
   // ✅ Preflight support for Shopify
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -142,6 +158,7 @@ module.exports = async (req, res) => {
     const body = req.body || {};
     const inputs = body.inputs;
     const sessionId = body.sessionId;
+    const tier = body.tier || "AI Curated Gift";
 
     if (!inputs || !sessionId) {
       return res.status(400).json({ error: "Missing inputs or sessionId" });
@@ -154,19 +171,27 @@ module.exports = async (req, res) => {
 
     const occasionRulesArr = OCCASION_MOTIFS[inputs.occasion] || ["items should clearly match the occasion"];
     const recipientRulesArr = RECIPIENT_MOTIFS[inputs.recipient] || ["items should clearly match the recipient type"];
+    const tierRulesArr = TIER_MOTIFS[tier] || TIER_MOTIFS["AI Curated Gift"];
     const vibeRulesArr = VIBE_STYLE[inputs.vibe] || ["styling should match the selected vibe"];
 
-    // "Must include" reinforcement for Baby shower + My Pet (helps prevent misses)
+    // Must-include reinforcement (helps prevent misses)
     const MUST_INCLUDE = [];
     if (inputs.occasion === "Baby shower") {
-      MUST_INCLUDE.push("include at least TWO of these baby items clearly visible: onesie, baby bottle, pacifier, baby blanket, plush toy");
+      MUST_INCLUDE.push("include at least TWO baby items clearly visible: onesie, baby bottle, pacifier, baby blanket, plush toy");
     }
     if (inputs.recipient === "My Pet") {
       MUST_INCLUDE.push("include pet items clearly visible: pet treats, toy, collar or accessory");
     }
+    if (tier === "AI Signature Gift") {
+      MUST_INCLUDE.push("make the box feel fuller with multiple visible layers (top, middle, bottom) and items peeking out");
+    }
 
-    // Safety / quality constraints (prevents weird outputs)
+    // ✅ Key: “no empty / no closed box” + safety negatives
     const NEGATIVE = [
+      "no empty boxes",
+      "no closed lids",
+      "no sealed packaging",
+      "no boxes without visible contents",
       "no text",
       "no logos",
       "no watermarks",
@@ -179,26 +204,54 @@ module.exports = async (req, res) => {
     ].join(", ");
 
     const prompt = `
-Photorealistic product photography of a premium nested gift box with items visible.
+Photorealistic product photography of a premium nested gift box with items clearly visible.
 
 Occasion: ${inputs.occasion}
 Recipient: ${inputs.recipient}
+Tier: ${tier}
 Vibe: ${inputs.vibe || "Not specified"}
 
 HARD CONSTRAINTS:
 - the gift box must be OPEN with the lid removed or pushed aside
 - items inside the box must be clearly visible at first glance
+- ${tierRulesArr.join("; ")}
 - ${occasionRulesArr.join("; ")}
 - ${recipientRulesArr.join("; ")}
-- ${tierRulesArr.join("; ")}
+- ${vibeRulesArr.join("; ")}
+- show items that obviously communicate the occasion (not subtle)
 - tasteful, premium, ready-to-gift presentation
 - realistic lighting, realistic textures, studio/product photo look
+- ${MUST_INCLUDE.length ? MUST_INCLUDE.join("; ") : "ensure contents are visible and relevant"}
 
 NEGATIVE CONSTRAINTS:
-- no empty boxes
-- no closed lids
-- no sealed packaging
-- no boxes without visible contents
-- no text, no logos, no watermarks
-- no explicit content
+- ${NEGATIVE}
+
+Optional context (subtle influence only):
+Notes: ${inputs.notes || "None"}
+Social: ${inputs.social || "None"}
 `.trim();
+
+    const output = await replicate.run("black-forest-labs/flux-dev", {
+      input: {
+        prompt,
+        aspect_ratio: "1:1",
+        output_format: "webp",
+        quality: 80
+      }
+    });
+
+    const imageUrl = Array.isArray(output) ? output[0] : output;
+
+    generationCount.set(sessionId, used + 1);
+
+    return res.status(200).json({
+      imageUrl,
+      used: used + 1
+    });
+
+  } catch (err) {
+    console.error("generate-preview crashed:", err);
+    return res.status(500).json({ error: "Generation failed" });
+  }
+};
+
