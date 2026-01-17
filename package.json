@@ -4,6 +4,7 @@
   "private": true,
   "type": "commonjs",
   "dependencies": {
+    "replicate": "^0.29.4",
     "openai": "^4.0.0"
   }
 }
