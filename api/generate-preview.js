@@ -1,394 +1,313 @@
-// /api/generate-preview.js
-// Vercel Serverless Function (Node.js, CommonJS)
-// Requires: npm i openai
+// api/generate-preview.js
+// Meaningfull™ AI Preview — Vercel Serverless Function (CommonJS)
+//
+// ✅ Replicate (Flux) image generation
+// ✅ CORS + OPTIONS (Shopify-friendly)
+// ✅ Max 2 generations per sessionId (MVP in-memory)
+// ✅ Occasion + Recipient motifs drive item content
+// ✅ Notes ("Anything else") actively influences output (age + keywords + exclusions)
+// ✅ MULTIPLE OPEN BOXES (nested set) + NO EMPTY/CLOSED boxes
+// ✅ Minimum items per box = 4
+// ✅ Halloween: spooky + horror + classic horror movie vibe (no gore)
 
-const OpenAIImport = require("openai");
-// Some installs expose default export in CommonJS
-const OpenAI = OpenAIImport.default || OpenAIImport;
+const Replicate = require("replicate");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN,
+});
 
-// ----------------------------
-// 1) Lightweight vocab lists
-// ----------------------------
+const MAX_GENERATIONS = 2;
+const generationCount = new Map();
 
-const BRAND_KEYWORDS = {
-  nike: {
-    label: "Nike-inspired athletic style",
-    visual:
-      "athletic footwear/apparel design language, performance textures, sporty accessories, black/white with optional neon accents",
-  },
-  adidas: {
-    label: "Adidas-inspired athletic style",
-    visual:
-      "streetwear athletic design language, performance fabrics, sporty accessories, black/white with muted accents",
-  },
-  apple: {
-    label: "Apple-inspired minimalist tech style",
-    visual: "minimal tech accessories, clean white/gray palette, refined packaging details",
-  },
-  lego: {
-    label: "LEGO-style toy",
-    visual: "brick-style building toy kit, clean playful geometry, premium presentation",
-  },
-  pokemon: {
-    label: "collectible creature-themed toy",
-    visual: "collectible card/toy vibe, playful shapes, premium display style",
-  },
-  "hot wheels": {
-    label: "mini car toy",
-    visual: "small collectible car toy, bold accent colors, premium layout",
-  },
-};
-
-const CATEGORY_KEYWORDS = {
-  toy: "at least one age-appropriate toy item",
-  toys: "at least one age-appropriate toy item",
-  shoes: "at least one footwear-related item",
-  sneaker: "at least one footwear-related item",
-  sneakers: "at least one footwear-related item",
-  jewelry: "at least one refined jewelry/accessory item",
-  gaming: "at least one gaming-related accessory (controller/headset/accessory)",
-  sports: "at least one sports-related lifestyle item",
-  books: "at least one aesthetically pleasing book/notebook item",
-  watch: "at least one watch-like accessory item",
-  watches: "at least one watch-like accessory item",
-  ring: "at least one ring-like accessory item",
-  rings: "at least one ring-like accessory item",
-  flowers: "a floral element integrated tastefully (bouquet or floral item)",
-  teddy: "a teddy bear or plush element appropriate to the recipient",
-  bear: "a bear/plush element appropriate to the recipient",
-};
-
-const COLOR_KEYWORDS = [
-  "blue",
-  "navy",
-  "light blue",
-  "baby blue",
-  "pink",
-  "hot pink",
-  "black",
-  "white",
-  "purple",
-  "gold",
-  "silver",
-  "red",
-  "green",
-  "pastel",
-  "neutral",
-  "beige",
-];
-
-// ----------------------------
-// 2) Helpers
-// ----------------------------
-
-function normalizeStr(s) {
-  return String(s || "").trim().replace(/\s+/g, " ");
-}
-function toLower(s) {
-  return normalizeStr(s).toLowerCase();
-}
-
-function extractBrands(anythingElse) {
-  const text = toLower(anythingElse);
-  const found = [];
-  const multiKeys = Object.keys(BRAND_KEYWORDS).filter((k) => k.includes(" "));
-  for (const k of multiKeys) if (text.includes(k)) found.push(k);
-
-  for (const k of Object.keys(BRAND_KEYWORDS)) {
-    if (k.includes(" ")) continue;
-    const re = new RegExp(`(^|\\W)${k}(\\W|$)`, "i");
-    if (re.test(anythingElse)) found.push(k);
-  }
-  return Array.from(new Set(found));
-}
-
-function extractCategories(anythingElse) {
-  const text = toLower(anythingElse);
-  const found = [];
-  for (const k of Object.keys(CATEGORY_KEYWORDS)) {
-    const re = new RegExp(`(^|\\W)${k}(\\W|$)`, "i");
-    if (re.test(anythingElse) || text.includes(k)) found.push(k);
-  }
-  return Array.from(new Set(found));
-}
-
-function extractColors(anythingElse) {
-  const text = toLower(anythingElse);
-  const found = [];
-  for (const c of COLOR_KEYWORDS) if (text.includes(c)) found.push(c);
-  return Array.from(new Set(found));
-}
-
-function inferAgeFromNotes(ageRaw) {
-  const n = Number(ageRaw);
-  if (Number.isFinite(n) && n > 0 && n < 120) return Math.round(n);
-
-  const m = String(ageRaw || "").match(/(\d{1,2})\s*(years?\s*old|yo)\b/i);
-  if (m) {
-    const v = Number(m[1]);
-    if (Number.isFinite(v)) return v;
-  }
-  return null;
-}
-
-function ageBand(age) {
-  if (!age || age < 0) return null;
-  if (age <= 6) return "3–6";
-  if (age <= 10) return "7–10";
-  if (age <= 14) return "11–14";
-  if (age <= 18) return "15–18";
-  return "18+";
-}
-
-// ----------------------------
-// 3) Prompt builder
-// ----------------------------
-
-function buildBasePrompt({ recipient, occasion, vibe, tier, anythingElse, colors }) {
-  const isSignature = String(tier || "").toLowerCase().includes("signature");
-  const layers = isSignature ? 3 : 2;
-  const minItems = isSignature ? "5–6" : "4";
-
-  const colorLine =
-    colors.length > 0
-      ? `COLOR PALETTE (HARD OVERRIDE):
-User specified colors: ${colors.join(", ")}.
-These colors must dominate the palette (not small accents).`
-      : `COLOR PALETTE:
-Derived from recipient type, occasion, and vibe.`;
-
-  return `
-High-end editorial product photography of a premium AI-curated gift box.
-
-STRUCTURE:
-${layers}-tier nested rigid gift box design.
-Top box partially open.
-Middle layer clearly visible with curated items.
-${layers === 3 ? "Bottom layer partially visible beneath." : "Second layer visible beneath the top."}
-
-ITEM RULES:
-Minimum ${minItems} visible items total.
-Items must be touching or naturally layered.
-No empty compartments.
-No floating objects.
-
-MATERIALS:
-Luxury rigid cardboard.
-Soft-touch matte finish.
-Linen or premium paper textures.
-Premium satin ribbon.
-
-LIGHTING & CAMERA:
-Soft studio lighting.
-Natural shadows.
-Shot on a 50mm lens.
-f/1.8 shallow depth of field.
-
-AESTHETIC:
-Boutique, intentional, emotionally resonant.
-No clutter. No randomness.
-
-CONTEXT:
-Recipient: ${normalizeStr(recipient) || "Unspecified"}
-Occasion: ${normalizeStr(occasion) || "Unspecified"}
-Vibe: ${normalizeStr(vibe) || "Unspecified"}
-
-${colorLine}
-
-IMPORTANT — USER PRIORITY OVERRIDE:
-Include items related to: ${normalizeStr(anythingElse) || "(none)"}
-These items must be clearly visible and integrated naturally into the gift box.
-
-CONSTRAINTS:
-Do not include text.
-Do not include UI elements.
-Do not include logos unless explicitly allowed.
-Do not include brand names as visible text.
-
-STYLE:
-Photorealistic. Ultra-detailed. Cinematic quality.
-`.trim();
-}
-
-function buildBrandInjection(brands) {
-  if (!brands.length) return "";
-  const lines = brands.map((b) => {
-    const meta = BRAND_KEYWORDS[b];
-    return `- ${meta.label}: ${meta.visual}`;
-  });
-  return `
-BRAND STYLE ENFORCEMENT (NO LOGOS BY DEFAULT):
-Represent brand style via shapes/materials/categories — NO logos/wordmarks.
-Brands to reflect:
-${lines.join("\n")}
-`.trim();
-}
-
-function buildCategoryInjection(categories, age) {
-  if (!categories.length) return "";
-  const band = ageBand(age);
-  const ageRule =
-    band && (categories.includes("toy") || categories.includes("toys"))
-      ? `Age-aware rule: recipient age is ${age} (band ${band}). Toy must be appropriate for this age band.`
-      : "";
-
-  const uniqueReqs = Array.from(
-    new Set(categories.map((c) => `- Must include: ${CATEGORY_KEYWORDS[c]} (trigger: "${c}")`))
-  );
-
-  return `
-CATEGORY ENFORCEMENT:
-${uniqueReqs.join("\n")}
-${ageRule ? `\n${ageRule}` : ""}
-`.trim();
-}
-
-function buildTierInjection(tier) {
-  const t = String(tier || "").toLowerCase();
-  if (t.includes("signature")) {
-    return `
-SIGNATURE TIER VISUAL DIFFERENTIATION:
-Fuller, deeper, more layered presentation.
-`.trim();
-  }
-  return `
-STARTER TIER VISUAL DIFFERENTIATION:
-Clean, simpler arrangement.
-`.trim();
-}
-
-function buildFinalPrompt(payload) {
-  const brands = extractBrands(payload.anythingElse);
-  const categories = extractCategories(payload.anythingElse);
-  const colors = extractColors(payload.anythingElse);
-
-  const base = buildBasePrompt({ ...payload, colors });
-  const brand = buildBrandInjection(brands);
-  const cat = buildCategoryInjection(categories, payload.age);
-  const tier = buildTierInjection(payload.tier);
-
-  return [base, brand, cat, tier].filter(Boolean).join("\n\n");
-}
-
-// ----------------------------
-// 4) Body parsing (Shopify-safe)
-// ----------------------------
-
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
-}
-
-async function getJsonBody(req) {
-  // If Vercel already parsed JSON:
-  if (req.body && typeof req.body === "object") return req.body;
-
-  const raw = await readRawBody(req);
-  if (!raw) return {};
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    // If it was form-encoded, you’ll see it here; return empty so we don’t crash.
-    return {};
-  }
-}
-
-// ----------------------------
-// 5) Main handler + CORS + OPTIONS
-// ----------------------------
-
-module.exports = async function handler(req, res) {
-  // CORS (prevents browser blocks from Shopify storefront)
+// ---- CORS ----
+function setCors(res) {
+  // MVP: allow all. For launch-hardening, set to "https://meaningfull.co"
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
 
-  if (req.method === "OPTIONS") {
-    res.status(200).end();
-    return;
+// ---- Notes parsing helpers (Anything else) ----
+function extractAge(notes = "") {
+  const m = String(notes).match(/(\d{1,2})\s*(?:yo|y\/o|years?\s*old)/i);
+  if (!m) return null;
+  const age = Number(m[1]);
+  return Number.isFinite(age) ? age : null;
+}
+
+function buildNotesRules(notes = "") {
+  const raw = String(notes || "");
+  const n = raw.toLowerCase();
+
+  const hard = [];
+  const avoid = [];
+
+  // Age -> strong constraint
+  const age = extractAge(raw);
+  if (age !== null) {
+    if (age <= 3) hard.push("infant/toddler-appropriate items only; baby-safe, soft, gentle, non-choking-size items");
+    else if (age <= 12) hard.push("kid-appropriate items only; playful, fun, absolutely no adult themes");
+    else if (age <= 17) hard.push("teen-appropriate items; trendy, cool, still safe and age-appropriate");
+    else hard.push("adult-appropriate items");
+  }
+
+  // Explicit exclusions (simple pattern)
+  // Examples users type: "no chocolate", "dont include alcohol", "avoid nuts"
+  const noPhrases = [
+    { key: "alcohol", rule: "no alcohol" },
+    { key: "chocolate", rule: "no chocolate items" },
+    { key: "nuts", rule: "avoid nuts" },
+    { key: "perfume", rule: "avoid perfume/fragrance items" },
+  ];
+  for (const p of noPhrases) {
+    if (n.includes(`no ${p.key}`) || n.includes(`don't include ${p.key}`) || n.includes(`dont include ${p.key}`) || n.includes(`avoid ${p.key}`)) {
+      avoid.push(p.rule);
+    }
+  }
+
+  // Interest nudges (visual nouns help the model)
+  const interests = [
+    { keys: ["sports", "soccer", "basketball", "hockey"], rule: "include subtle sports-themed gift items appropriate to the recipient" },
+    { keys: ["music", "guitar", "piano", "concert", "vinyl"], rule: "include subtle music-themed gift items appropriate to the recipient" },
+    { keys: ["gaming", "video game", "playstation", "xbox", "nintendo"], rule: "include subtle gaming-themed gift items appropriate to the recipient" },
+    { keys: ["skincare", "self care", "spa"], rule: "include subtle skincare/self-care themed items appropriate to the recipient" },
+    { keys: ["coffee", "espresso", "tea"], rule: "include subtle coffee/tea themed items appropriate to the recipient" },
+    { keys: ["books", "reading", "novel"], rule: "include subtle book/reading themed items appropriate to the recipient" },
+    { keys: ["cats", "cat"], rule: "include subtle cat-themed items (only if recipient is a pet-lover; keep tasteful)" },
+    { keys: ["dogs", "dog"], rule: "include subtle dog-themed items (only if recipient is a pet-lover; keep tasteful)" },
+  ];
+  for (const it of interests) {
+    if (it.keys.some(k => n.includes(k))) {
+      hard.push(it.rule);
+      break;
+    }
+  }
+
+  // If user says "surprise me" (and nothing else useful)
+  if ((n.includes("surprise me") || n.includes("surprise")) && hard.length === 0 && age === null) {
+    hard.push("choose a balanced, universally appealing mix of items appropriate for the occasion and recipient");
+  }
+
+  return { hard, avoid, age, raw };
+}
+
+// ✅ Match your EasyFlow option text EXACTLY (case/spacing)
+const OCCASION_MOTIFS = {
+  "Birthday": [
+    "birthday-themed items visible",
+    "small celebration accents (confetti, candles, ribbon)",
+    "a greeting card or gift tag vibe"
+  ],
+  "Christmas": [
+    "holiday-themed items visible",
+    "winter/evergreen accents, cozy seasonal feel",
+    "gift wrap details, festive but premium"
+  ],
+  "Halloween": [
+    "halloween-themed items visible",
+    "spooky and horror influence without gore",
+    "classic horror movie vibe (retro cinematic lighting, moody shadows, vintage horror aesthetic)",
+    "pumpkin/orange/black accents, eerie candlelight, foggy ambience",
+    "include subtle classic horror props (unbranded): old film reel, vintage VHS tape, gothic candle, small skull figurine"
+  ],
+  "New Years": [
+    "new year celebration feel",
+    "sparkle accents, classy festive styling",
+    "midnight celebration vibe (not nightclub)"
+  ],
+  "Baby shower": [
+    "baby-themed items visible",
+    "onesie or baby clothing",
+    "baby blanket or soft plush",
+    "pacifier or baby bottle",
+    "gentle pastel styling"
+  ],
+  "Easter": [
+    "easter-themed items visible",
+    "spring/pastel accents, soft cheerful styling",
+    "chocolate eggs or bunny motif"
+  ],
+  "Valentines Day": [
+    "romantic-themed items visible",
+    "rose or heart accents, warm intimate styling",
+    "love note card vibe"
+  ],
+  "Just Because": [
+    "thoughtful everyday gift feel",
+    "cozy, uplifting, personal touches",
+    "subtle, not overly seasonal"
+  ]
+};
+
+const RECIPIENT_MOTIFS = {
+  // Keep your existing values + add common expansions
+  "Boyfriend": ["romantic but tasteful items appropriate for a boyfriend; not stereotypical"],
+  "Girlfriend": ["romantic but tasteful items appropriate for a girlfriend; not stereotypical"],
+  "Husband": ["mature, refined, practical + sentimental mix appropriate for a husband"],
+  "Wife": ["mature, refined, sentimental + elegant mix appropriate for a wife"],
+  "Someone I'm dating": ["early-relationship appropriate (sweet, not intense), polished and safe"],
+  "Friend": ["friendly, fun, not romantic, universally likeable items"],
+  "Sibling": ["playful, casual, non-romantic items, fun but thoughtful"],
+  "Mom": ["warm, caring, elevated comfort vibe, appreciative touches"],
+  "Dad": ["warm, practical, classic vibe, appreciative touches"],
+  "Parent": ["warm, appreciative, elevated comfort vibe; practical + sentimental mix"],
+  "Son": ["kid-appropriate items; playful and fun; no adult themes"],
+  "Daughter": ["kid-appropriate items; warm and playful; no adult themes"],
+  "Relative": ["neutral, family-friendly items; avoid romantic themes"],
+  "My Pet": ["pet-themed items visible; treats, toys, accessories; cute but premium"]
+};
+
+// Optional vibe tightening
+const VIBE_STYLE = {
+  "Minimalist": [
+    "minimal, uncluttered composition",
+    "neutral or soft muted palette",
+    "clean premium packaging"
+  ],
+  "Luxury": [
+    "high-end premium look",
+    "richer textures",
+    "elevated presentation"
+  ],
+  "Playful": [
+    "brighter accents",
+    "fun, lively styling"
+  ],
+  "Surprise me": [
+    "balanced, universally appealing styling that matches the occasion"
+  ]
+};
+
+module.exports = async (req, res) => {
+  setCors(res);
+
+  // ✅ Preflight support for Shopify
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    if (req.method !== "POST") {
-      res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
-      return;
+    if (!process.env.REPLICATE_API_TOKEN) {
+      return res.status(500).json({ error: "Missing REPLICATE_API_TOKEN in Vercel env vars" });
     }
 
-    if (!process.env.OPENAI_API_KEY) {
-      res.status(500).json({ ok: false, error: "Missing OPENAI_API_KEY env var on Vercel." });
-      return;
+    const body = req.body || {};
+    const inputs = body.inputs;
+    const sessionId = body.sessionId;
+
+    if (!inputs || !sessionId) {
+      return res.status(400).json({ error: "Missing inputs or sessionId" });
     }
 
-    const body = await getJsonBody(req);
+    const used = generationCount.get(sessionId) || 0;
+    if (used >= MAX_GENERATIONS) {
+      return res.status(429).json({ error: "Generation limit reached", used });
+    }
 
-    const {
-      recipient = "",
-      age = null,
-      occasion = "",
-      vibe = "",
-      anythingElse = "",
-      tier = "Starter",
-      size = "1024x1024",
-      quality = "high",
-      background = "transparent",
-    } = body || {};
+    // ---- Strong “multi-box + min items” constraints ----
+    const BOX_COUNT = 3;           // multiple boxes (nested set)
+    const MIN_ITEMS_PER_BOX = 4;   // minimum items per box
 
-    const parsedAge = inferAgeFromNotes(age);
+    const occasionRulesArr = OCCASION_MOTIFS[inputs.occasion] || ["items should clearly match the occasion"];
+    const recipientRulesArr = RECIPIENT_MOTIFS[inputs.recipient] || ["items should clearly match the recipient type"];
+    const vibeRulesArr = VIBE_STYLE[inputs.vibe] || ["styling should match the selected vibe"];
 
-    const payload = {
-      recipient,
-      age: parsedAge,
-      occasion,
-      vibe,
-      anythingElse: normalizeStr(anythingElse).slice(0, 400),
-      tier,
-    };
+    const notesRules = buildNotesRules(inputs.notes || "");
 
-    const finalPrompt = buildFinalPrompt(payload);
+    // Must-include reinforcement (reduces misses)
+    const MUST_INCLUDE = [];
+    MUST_INCLUDE.push(
+      `show ${BOX_COUNT} open nested boxes (top, middle, bottom), each box open with contents visible`,
+      `at least ${MIN_ITEMS_PER_BOX} distinct items clearly visible in EACH box (minimum total items visible: ${BOX_COUNT * MIN_ITEMS_PER_BOX})`,
+      "items should be separated enough to count visually (not hidden under tissue)",
+      "include some items peeking out for depth, but do not clutter the frame"
+    );
 
-    const img = await openai.images.generate({
-      model: process.env.IMAGE_MODEL || "gpt-image-1",
-      prompt: finalPrompt,
-      size,
-      quality,
-      background,
-      n: 1,
+    if (inputs.occasion === "Baby shower") {
+      MUST_INCLUDE.push("include at least TWO baby items clearly visible: onesie, baby bottle, pacifier, baby blanket, plush toy");
+    }
+    if (inputs.recipient === "My Pet") {
+      MUST_INCLUDE.push("include pet items clearly visible: pet treats, toy, collar or accessory");
+    }
+
+    // Safety / quality negatives (and your “no empty/closed” guarantee)
+    const NEGATIVE = [
+      "no empty boxes",
+      "no closed lids",
+      "no sealed packaging",
+      "no boxes without visible contents",
+      "no fully closed gift boxes",
+      "no minimalist empty packaging-only shots",
+      "no text",
+      "no logos",
+      "no watermarks",
+      "no explicit content",
+      "no alcohol",
+      "no weapons",
+      "no lingerie",
+      "no cigarettes or drugs",
+      "no gore",
+      "no graphic violence"
+    ];
+
+    // Add “avoid” rules from Notes
+    if (notesRules.avoid.length) {
+      NEGATIVE.push(...notesRules.avoid);
+    }
+
+    // Halloween: allow spooky/horror tone but keep it safe (no gore)
+    // (We already included this in OCCASION_MOTIFS["Halloween"] and NEGATIVE blocks.)
+
+    const prompt = `
+Photorealistic product photography of a premium nested gift box set with items clearly visible.
+
+Occasion: ${inputs.occasion}
+Recipient: ${inputs.recipient}
+Vibe: ${inputs.vibe || "Not specified"}
+
+HARD CONSTRAINTS:
+- the gift box must be OPEN with the lid removed or pushed aside
+- items inside the boxes must be clearly visible at first glance
+- ${MUST_INCLUDE.join("; ")}
+- ${occasionRulesArr.join("; ")}
+- ${recipientRulesArr.join("; ")}
+- ${vibeRulesArr.join("; ")}
+- ${notesRules.hard.length ? notesRules.hard.join("; ") : "use notes to meaningfully influence items when specific"}
+- tasteful, premium, ready-to-gift presentation
+- realistic lighting, realistic textures, studio/product photo look
+- show items that obviously communicate the occasion (not subtle)
+
+NEGATIVE CONSTRAINTS:
+- ${NEGATIVE.join(", ")}
+
+Notes (user text, treat as constraints when specific):
+${notesRules.raw || "None"}
+
+Social context (subtle influence only):
+${inputs.social || "None"}
+`.trim();
+
+    const output = await replicate.run("black-forest-labs/flux-dev", {
+      input: {
+        prompt,
+        aspect_ratio: "1:1",
+        output_format: "webp",
+        quality: 85
+      }
     });
 
-    const b64 = img?.data?.[0]?.b64_json;
-    if (!b64) {
-      res.status(500).json({ ok: false, error: "No image data returned from OpenAI." });
-      return;
-    }
+    const imageUrl = Array.isArray(output) ? output[0] : output;
 
-    const imageDataUrl = `data:image/png;base64,${b64}`;
+    generationCount.set(sessionId, used + 1);
 
-    res.status(200).json({
-      ok: true,
-      imageDataUrl,
-      meta: {
-        tier,
-        parsedAge,
-        extracted: {
-          brands: extractBrands(payload.anythingElse),
-          categories: extractCategories(payload.anythingElse),
-          colors: extractColors(payload.anythingElse),
-        },
-      },
+    return res.status(200).json({
+      imageUrl,
+      used: used + 1
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      ok: false,
-      error: "Server error generating preview.",
-      details: String((err && err.message) || err),
-    });
+    console.error("generate-preview crashed:", err);
+    return res.status(500).json({ error: "Generation failed" });
   }
 };
