@@ -1,11 +1,10 @@
 // /api/generate-preview.js
 // Vercel Serverless Function (Node.js, CommonJS)
 // Requires: npm i openai
-//
-// Uses OpenAI Image API (gpt-image-1) to generate a premium "editorial hero shot"
-// and (optionally) runs a vision-based validation pass to ensure Anything Else was obeyed.
 
-const OpenAI = require("openai");
+const OpenAIImport = require("openai");
+// Some installs expose default export in CommonJS
+const OpenAI = OpenAIImport.default || OpenAIImport;
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -18,7 +17,6 @@ const BRAND_KEYWORDS = {
     label: "Nike-inspired athletic style",
     visual:
       "athletic footwear/apparel design language, performance textures, sporty accessories, black/white with optional neon accents",
-    // Keep it "inspired", avoid logos by default
   },
   adidas: {
     label: "Adidas-inspired athletic style",
@@ -82,13 +80,12 @@ const COLOR_KEYWORDS = [
 ];
 
 // ----------------------------
-// 2) Helpers: normalize + extract
+// 2) Helpers
 // ----------------------------
 
 function normalizeStr(s) {
   return String(s || "").trim().replace(/\s+/g, " ");
 }
-
 function toLower(s) {
   return normalizeStr(s).toLowerCase();
 }
@@ -96,20 +93,14 @@ function toLower(s) {
 function extractBrands(anythingElse) {
   const text = toLower(anythingElse);
   const found = [];
-
-  // Handle multi-word keys first
   const multiKeys = Object.keys(BRAND_KEYWORDS).filter((k) => k.includes(" "));
-  for (const k of multiKeys) {
-    if (text.includes(k)) found.push(k);
-  }
+  for (const k of multiKeys) if (text.includes(k)) found.push(k);
 
-  // Single-word keys
   for (const k of Object.keys(BRAND_KEYWORDS)) {
     if (k.includes(" ")) continue;
     const re = new RegExp(`(^|\\W)${k}(\\W|$)`, "i");
     if (re.test(anythingElse)) found.push(k);
   }
-
   return Array.from(new Set(found));
 }
 
@@ -126,9 +117,7 @@ function extractCategories(anythingElse) {
 function extractColors(anythingElse) {
   const text = toLower(anythingElse);
   const found = [];
-  for (const c of COLOR_KEYWORDS) {
-    if (text.includes(c)) found.push(c);
-  }
+  for (const c of COLOR_KEYWORDS) if (text.includes(c)) found.push(c);
   return Array.from(new Set(found));
 }
 
@@ -154,7 +143,7 @@ function ageBand(age) {
 }
 
 // ----------------------------
-// 3) Prompt builder (the “money”)
+// 3) Prompt builder
 // ----------------------------
 
 function buildBasePrompt({ recipient, occasion, vibe, tier, anythingElse, colors }) {
@@ -196,13 +185,10 @@ Soft studio lighting.
 Natural shadows.
 Shot on a 50mm lens.
 f/1.8 shallow depth of field.
-Foreground sharp, background softly blurred.
 
 AESTHETIC:
 Boutique, intentional, emotionally resonant.
-Feels handcrafted and premium.
-No clutter.
-No randomness.
+No clutter. No randomness.
 
 CONTEXT:
 Recipient: ${normalizeStr(recipient) || "Unspecified"}
@@ -212,10 +198,8 @@ Vibe: ${normalizeStr(vibe) || "Unspecified"}
 ${colorLine}
 
 IMPORTANT — USER PRIORITY OVERRIDE:
-User-specified preferences must be visually represented.
 Include items related to: ${normalizeStr(anythingElse) || "(none)"}
 These items must be clearly visible and integrated naturally into the gift box.
-Do not abstract or ignore these preferences.
 
 CONSTRAINTS:
 Do not include text.
@@ -224,25 +208,19 @@ Do not include logos unless explicitly allowed.
 Do not include brand names as visible text.
 
 STYLE:
-Photorealistic.
-Ultra-detailed.
-Cinematic quality.
+Photorealistic. Ultra-detailed. Cinematic quality.
 `.trim();
 }
 
 function buildBrandInjection(brands) {
   if (!brands.length) return "";
-
   const lines = brands.map((b) => {
     const meta = BRAND_KEYWORDS[b];
     return `- ${meta.label}: ${meta.visual}`;
   });
-
   return `
 BRAND STYLE ENFORCEMENT (NO LOGOS BY DEFAULT):
-The user mentioned brands. Represent the brand style through product category, materials, shapes, and color language.
-Do NOT show logos or wordmarks.
-
+Represent brand style via shapes/materials/categories — NO logos/wordmarks.
 Brands to reflect:
 ${lines.join("\n")}
 `.trim();
@@ -250,7 +228,6 @@ ${lines.join("\n")}
 
 function buildCategoryInjection(categories, age) {
   if (!categories.length) return "";
-
   const band = ageBand(age);
   const ageRule =
     band && (categories.includes("toy") || categories.includes("toys"))
@@ -274,13 +251,11 @@ function buildTierInjection(tier) {
     return `
 SIGNATURE TIER VISUAL DIFFERENTIATION:
 Fuller, deeper, more layered presentation.
-Richer lighting with slightly warmer cinematic shadows.
 `.trim();
   }
   return `
 STARTER TIER VISUAL DIFFERENTIATION:
 Clean, simpler arrangement.
-Bright, minimal, intentional spacing.
 `.trim();
 }
 
@@ -298,68 +273,60 @@ function buildFinalPrompt(payload) {
 }
 
 // ----------------------------
-// 4) Optional vision validator (recommended)
+// 4) Body parsing (Shopify-safe)
 // ----------------------------
 
-async function validateWithVision({ imageDataUrl, anythingElse }) {
-  if (!normalizeStr(anythingElse)) return { ok: true, reason: "no_anything_else" };
-
-  const mustMention = normalizeStr(anythingElse);
-  const prompt = `
-You are a strict QA inspector for a generated product image preview.
-The user wrote: "${mustMention}"
-
-Task:
-1) Decide if the image clearly reflects the user's request.
-2) Return JSON with:
-{
-  "ok": boolean,
-  "missing": string[],
-  "notes": string
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
 }
 
-Rules:
-- Be strict. If the request includes brands (e.g., Nike), confirm the image reflects the style/category clearly (do NOT require logos).
-- If request includes "toy/toys", confirm a toy-like item is visible.
-- If request includes colors (e.g., blue), confirm those colors dominate.
-- If uncertain, set ok=false.
-Return ONLY JSON.
-`.trim();
+async function getJsonBody(req) {
+  // If Vercel already parsed JSON:
+  if (req.body && typeof req.body === "object") return req.body;
 
-  const resp = await openai.responses.create({
-    model: process.env.VISION_MODEL || "gpt-4.1-mini",
-    input: [
-      {
-        role: "user",
-        content: [
-          { type: "input_text", text: prompt },
-          { type: "input_image", image_url: imageDataUrl },
-        ],
-      },
-    ],
-  });
+  const raw = await readRawBody(req);
+  if (!raw) return {};
 
-  const text = resp.output_text || "";
   try {
-    const jsonStart = text.indexOf("{");
-    const jsonEnd = text.lastIndexOf("}");
-    const sliced = jsonStart >= 0 && jsonEnd >= 0 ? text.slice(jsonStart, jsonEnd + 1) : text;
-    return JSON.parse(sliced);
+    return JSON.parse(raw);
   } catch {
-    return { ok: false, missing: ["validation_parse_error"], notes: text.slice(0, 300) };
+    // If it was form-encoded, you’ll see it here; return empty so we don’t crash.
+    return {};
   }
 }
 
 // ----------------------------
-// 5) Main handler
+// 5) Main handler + CORS + OPTIONS
 // ----------------------------
 
 module.exports = async function handler(req, res) {
+  // CORS (prevents browser blocks from Shopify storefront)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
   try {
     if (req.method !== "POST") {
-      res.status(405).json({ error: "Method not allowed. Use POST." });
+      res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
       return;
     }
+
+    if (!process.env.OPENAI_API_KEY) {
+      res.status(500).json({ ok: false, error: "Missing OPENAI_API_KEY env var on Vercel." });
+      return;
+    }
+
+    const body = await getJsonBody(req);
 
     const {
       recipient = "",
@@ -368,11 +335,10 @@ module.exports = async function handler(req, res) {
       vibe = "",
       anythingElse = "",
       tier = "Starter",
-      // image controls (optional)
       size = "1024x1024",
       quality = "high",
       background = "transparent",
-    } = req.body || {};
+    } = body || {};
 
     const parsedAge = inferAgeFromNotes(age);
 
@@ -381,65 +347,41 @@ module.exports = async function handler(req, res) {
       age: parsedAge,
       occasion,
       vibe,
-      anythingElse: normalizeStr(anythingElse).slice(0, 400), // small safety cap
+      anythingElse: normalizeStr(anythingElse).slice(0, 400),
       tier,
     };
 
     const finalPrompt = buildFinalPrompt(payload);
 
-    const maxAttempts = 2;
-    let attempt = 0;
-    let lastResult = null;
+    const img = await openai.images.generate({
+      model: process.env.IMAGE_MODEL || "gpt-image-1",
+      prompt: finalPrompt,
+      size,
+      quality,
+      background,
+      n: 1,
+    });
 
-    while (attempt < maxAttempts) {
-      attempt += 1;
-
-      const img = await openai.images.generate({
-        model: process.env.IMAGE_MODEL || "gpt-image-1",
-        prompt: finalPrompt,
-        size,
-        quality,
-        background,
-        n: 1,
-      });
-
-      const b64 = img?.data?.[0]?.b64_json;
-      if (!b64) {
-        lastResult = { ok: false, reason: "no_image_data_returned" };
-        continue;
-      }
-
-      const imageDataUrl = `data:image/png;base64,${b64}`;
-
-      if (String(process.env.VALIDATE_WITH_VISION || "").toLowerCase() === "true") {
-        const verdict = await validateWithVision({ imageDataUrl, anythingElse: payload.anythingElse });
-        if (!verdict?.ok) {
-          lastResult = { ok: false, reason: "vision_validation_failed", verdict };
-          continue;
-        }
-      }
-
-      res.status(200).json({
-        ok: true,
-        attempt,
-        imageDataUrl,
-        meta: {
-          tier,
-          parsedAge,
-          extracted: {
-            brands: extractBrands(payload.anythingElse),
-            categories: extractCategories(payload.anythingElse),
-            colors: extractColors(payload.anythingElse),
-          },
-        },
-      });
+    const b64 = img?.data?.[0]?.b64_json;
+    if (!b64) {
+      res.status(500).json({ ok: false, error: "No image data returned from OpenAI." });
       return;
     }
 
+    const imageDataUrl = `data:image/png;base64,${b64}`;
+
     res.status(200).json({
-      ok: false,
-      error: "Image generation failed validation after max attempts.",
-      lastResult,
+      ok: true,
+      imageDataUrl,
+      meta: {
+        tier,
+        parsedAge,
+        extracted: {
+          brands: extractBrands(payload.anythingElse),
+          categories: extractCategories(payload.anythingElse),
+          colors: extractColors(payload.anythingElse),
+        },
+      },
     });
   } catch (err) {
     console.error(err);
@@ -450,7 +392,3 @@ module.exports = async function handler(req, res) {
     });
   }
 };
-
-
-
-
