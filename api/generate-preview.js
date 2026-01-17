@@ -18,7 +18,7 @@ const generationCount = new Map();
 const OCCASION_MOTIFS = {
   "Birthday": [
     "birthday-themed items visible",
-    "small celebration accents (confetti, candles, ribbon)",
+    "small celebration accents (balloons, confetti, candles, ribbon)",
     "a greeting card or gift tag vibe"
   ],
   "Christmas": [
@@ -28,13 +28,13 @@ const OCCASION_MOTIFS = {
   ],
   "Halloween": [
     "halloween-themed items visible",
-    "pumpkin/orange/black accents, playful spooky (not horror)",
-    "seasonal treats or cozy autumn vibe"
+    "pumpkin/orange/black/purple/green accents, playful spooky horror)",
+    "classic candy simple halloween costume seasonal treats or cozy autumn vibe classic horror movie"
   ],
   "New Years": [
     "new year celebration feel",
     "sparkle accents, classy festive styling",
-    "midnight celebration vibe (not nightclub)"
+    "midnight celebration vibe gala nightclub"
   ],
   "Baby shower": [
     "baby-themed items visible",
@@ -186,42 +186,19 @@ Recipient: ${inputs.recipient}
 Vibe: ${inputs.vibe || "Not specified"}
 
 HARD CONSTRAINTS:
+- the gift box must be OPEN with the lid removed or pushed aside
+- items inside the box must be clearly visible at first glance
 - ${occasionRulesArr.join("; ")}
 - ${recipientRulesArr.join("; ")}
-- ${vibeRulesArr.join("; ")}
-- show items that obviously communicate the occasion (not subtle)
+- ${tierRulesArr.join("; ")}
 - tasteful, premium, ready-to-gift presentation
 - realistic lighting, realistic textures, studio/product photo look
-- ${MUST_INCLUDE.length ? MUST_INCLUDE.join("; ") : "items should be clearly relevant and appropriate"}
 
 NEGATIVE CONSTRAINTS:
-- ${NEGATIVE}
-
-Optional context (use as subtle influence only):
-Notes: ${inputs.notes || "None"}
-Social: ${inputs.social || "None"}
+- no empty boxes
+- no closed lids
+- no sealed packaging
+- no boxes without visible contents
+- no text, no logos, no watermarks
+- no explicit content
 `.trim();
-
-    const output = await replicate.run("black-forest-labs/flux-dev", {
-      input: {
-        prompt,
-        aspect_ratio: "1:1",
-        output_format: "webp",
-        quality: 80
-      }
-    });
-
-    const imageUrl = Array.isArray(output) ? output[0] : output;
-
-    generationCount.set(sessionId, used + 1);
-
-    return res.status(200).json({
-      imageUrl,
-      used: used + 1
-    });
-
-  } catch (err) {
-    console.error("generate-preview crashed:", err);
-    return res.status(500).json({ error: "Generation failed" });
-  }
-};
