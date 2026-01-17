@@ -2,13 +2,16 @@
 // Meaningfull™ AI Preview — Vercel Serverless Function (CommonJS)
 //
 // ✅ Replicate (Flux) image generation
-// ✅ CORS + OPTIONS (Shopify-friendly)
+// ✅ CORS + OPTIONS preflight (Shopify-friendly)
 // ✅ Max 2 generations per sessionId (MVP in-memory)
-// ✅ Occasion + Recipient motifs drive item content
-// ✅ Notes ("Anything else") actively influences output (age + keywords + exclusions)
-// ✅ MULTIPLE OPEN BOXES (nested set) + NO EMPTY/CLOSED boxes
+// ✅ Occasion + Recipient motifs drive item content (Baby shower => baby items)
+// ✅ Notes ("Anything else") actively influences output:
+//    - color parsing => applies to boxes + accents
+//    - age parsing => child/teen/adult-safe constraint
+//    - horror keywords => classic horror vibe + original unbranded character elements (no recognizable IP)
+// ✅ MULTIPLE OPEN BOXES (nested set), no empty/closed boxes
 // ✅ Minimum items per box = 4
-// ✅ Halloween: spooky + horror + classic horror movie vibe (no gore)
+// ✅ Brand + style consistency ("Meaningfull™ look"): premium, clean, modern, studio/product photo, no text/logos
 
 const Replicate = require("replicate");
 
@@ -27,12 +30,32 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ---- Notes parsing helpers (Anything else) ----
+// -------------------- Notes parsing helpers --------------------
 function extractAge(notes = "") {
   const m = String(notes).match(/(\d{1,2})\s*(?:yo|y\/o|years?\s*old)/i);
   if (!m) return null;
   const age = Number(m[1]);
   return Number.isFinite(age) ? age : null;
+}
+
+function extractColors(notes = "") {
+  const n = String(notes).toLowerCase();
+
+  const COLOR_WORDS = [
+    "black","white","gray","grey","silver","gold",
+    "red","blue","navy","pink","purple","violet","lavender",
+    "green","emerald","sage","teal",
+    "yellow","orange",
+    "brown","beige","cream",
+    "pastel","neon"
+  ];
+
+  const found = [];
+  for (const c of COLOR_WORDS) {
+    const re = new RegExp(`\\b${c}\\b`, "i");
+    if (re.test(n)) found.push(c);
+  }
+  return Array.from(new Set(found));
 }
 
 function buildNotesRules(notes = "") {
@@ -51,30 +74,33 @@ function buildNotesRules(notes = "") {
     else hard.push("adult-appropriate items");
   }
 
-  // Explicit exclusions (simple pattern)
-  // Examples users type: "no chocolate", "dont include alcohol", "avoid nuts"
+  // Explicit exclusions
   const noPhrases = [
     { key: "alcohol", rule: "no alcohol" },
     { key: "chocolate", rule: "no chocolate items" },
     { key: "nuts", rule: "avoid nuts" },
     { key: "perfume", rule: "avoid perfume/fragrance items" },
+    { key: "fragrance", rule: "avoid perfume/fragrance items" },
   ];
   for (const p of noPhrases) {
-    if (n.includes(`no ${p.key}`) || n.includes(`don't include ${p.key}`) || n.includes(`dont include ${p.key}`) || n.includes(`avoid ${p.key}`)) {
+    if (
+      n.includes(`no ${p.key}`) ||
+      n.includes(`don't include ${p.key}`) ||
+      n.includes(`dont include ${p.key}`) ||
+      n.includes(`avoid ${p.key}`)
+    ) {
       avoid.push(p.rule);
     }
   }
 
-  // Interest nudges (visual nouns help the model)
+  // Interest nudges (visual nouns)
   const interests = [
     { keys: ["sports", "soccer", "basketball", "hockey"], rule: "include subtle sports-themed gift items appropriate to the recipient" },
     { keys: ["music", "guitar", "piano", "concert", "vinyl"], rule: "include subtle music-themed gift items appropriate to the recipient" },
     { keys: ["gaming", "video game", "playstation", "xbox", "nintendo"], rule: "include subtle gaming-themed gift items appropriate to the recipient" },
     { keys: ["skincare", "self care", "spa"], rule: "include subtle skincare/self-care themed items appropriate to the recipient" },
-    { keys: ["coffee", "espresso", "tea"], rule: "include subtle coffee/tea themed items appropriate to the recipient" },
-    { keys: ["books", "reading", "novel"], rule: "include subtle book/reading themed items appropriate to the recipient" },
-    { keys: ["cats", "cat"], rule: "include subtle cat-themed items (only if recipient is a pet-lover; keep tasteful)" },
-    { keys: ["dogs", "dog"], rule: "include subtle dog-themed items (only if recipient is a pet-lover; keep tasteful)" },
+    { keys: ["coffee", "espresso", "tea"], rule: "include subtle coffee/tea themed gift items appropriate to the recipient" },
+    { keys: ["books", "reading", "novel"], rule: "include subtle book/reading themed gift items appropriate to the recipient" },
   ];
   for (const it of interests) {
     if (it.keys.some(k => n.includes(k))) {
@@ -83,15 +109,38 @@ function buildNotesRules(notes = "") {
     }
   }
 
-  // If user says "surprise me" (and nothing else useful)
+  // 🎨 Color detection (brand-safe)
+  const colors = extractColors(raw);
+  if (colors.length) {
+    hard.push(`color theme must visibly include these colors: ${colors.join(", ")}`);
+    hard.push("apply the color theme to the gift boxes and accent elements (ribbons, tissue paper, small decor)");
+    hard.push("keep the overall look premium and cohesive (do not look childish unless age indicates a child)");
+  }
+
+  // 🎬 Horror detection (safe: no recognizable IP, no gore)
+  const horrorKeywords = [
+    "horror", "horror movie", "slasher", "gothic", "creepy", "haunted",
+    "classic horror", "classic horror movie"
+  ];
+  const horrorMode = horrorKeywords.some(k => n.includes(k)) || n.includes("horror");
+
+  if (horrorMode) {
+    hard.push("classic horror movie aesthetic: moody cinematic lighting, retro film-grain feel, foggy ambience");
+    hard.push("include ONE or TWO original, unbranded horror-style character elements as subtle decor (e.g., shadowy silhouette figurine, masked costume prop, vintage monster poster-style prop) — NOT recognizable IP");
+    avoid.push("no recognizable copyrighted characters");
+    avoid.push("no brand names or franchise logos");
+    avoid.push("no gore or graphic violence");
+  }
+
   if ((n.includes("surprise me") || n.includes("surprise")) && hard.length === 0 && age === null) {
     hard.push("choose a balanced, universally appealing mix of items appropriate for the occasion and recipient");
   }
 
-  return { hard, avoid, age, raw };
+  return { hard, avoid, age, raw, colors, horrorMode };
 }
 
-// ✅ Match your EasyFlow option text EXACTLY (case/spacing)
+// -------------------- Option maps --------------------
+// Match EasyFlow option text EXACTLY (case/spacing)
 const OCCASION_MOTIFS = {
   "Birthday": [
     "birthday-themed items visible",
@@ -140,7 +189,6 @@ const OCCASION_MOTIFS = {
 };
 
 const RECIPIENT_MOTIFS = {
-  // Keep your existing values + add common expansions
   "Boyfriend": ["romantic but tasteful items appropriate for a boyfriend; not stereotypical"],
   "Girlfriend": ["romantic but tasteful items appropriate for a girlfriend; not stereotypical"],
   "Husband": ["mature, refined, practical + sentimental mix appropriate for a husband"],
@@ -157,7 +205,6 @@ const RECIPIENT_MOTIFS = {
   "My Pet": ["pet-themed items visible; treats, toys, accessories; cute but premium"]
 };
 
-// Optional vibe tightening
 const VIBE_STYLE = {
   "Minimalist": [
     "minimal, uncluttered composition",
@@ -178,10 +225,33 @@ const VIBE_STYLE = {
   ]
 };
 
+// -------------------- Brand lock (Meaningfull™ aesthetic) --------------------
+const BRAND_RULES = [
+  "premium modern gift aesthetic, clean and curated, not messy or chaotic",
+  "studio/product photography: soft diffused lighting, realistic textures, high detail",
+  "top-down or 3/4 angle composition that clearly shows contents",
+  "cohesive color palette and premium materials (matte paper, satin ribbon, tissue paper)",
+  "nested gift presentation feels intentional and emotionally thoughtful",
+  "no visible brand logos on items; all packaging is generic/unbranded"
+];
+
+const BRAND_NEGATIVE = [
+  "no text overlays",
+  "no typography",
+  "no labels or readable packaging text",
+  "no watermarks",
+  "no UI elements",
+  "no empty boxes",
+  "no closed lids",
+  "no sealed packaging",
+  "no boxes without visible contents"
+];
+
+// -------------------- Handler --------------------
 module.exports = async (req, res) => {
   setCors(res);
 
-  // ✅ Preflight support for Shopify
+  // Preflight support
   if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "POST") {
@@ -206,8 +276,8 @@ module.exports = async (req, res) => {
       return res.status(429).json({ error: "Generation limit reached", used });
     }
 
-    // ---- Strong “multi-box + min items” constraints ----
-    const BOX_COUNT = 3;           // multiple boxes (nested set)
+    // Multi-box + min items requirements
+    const BOX_COUNT = 3;           // "multiple boxes"
     const MIN_ITEMS_PER_BOX = 4;   // minimum items per box
 
     const occasionRulesArr = OCCASION_MOTIFS[inputs.occasion] || ["items should clearly match the occasion"];
@@ -216,33 +286,29 @@ module.exports = async (req, res) => {
 
     const notesRules = buildNotesRules(inputs.notes || "");
 
-    // Must-include reinforcement (reduces misses)
-    const MUST_INCLUDE = [];
-    MUST_INCLUDE.push(
-      `show ${BOX_COUNT} open nested boxes (top, middle, bottom), each box open with contents visible`,
+    // Must-include reinforcement (reliability)
+    const MUST_INCLUDE = [
+      `show ${BOX_COUNT} open nested boxes (top, middle, bottom), each box OPEN with lid removed or pushed aside`,
       `at least ${MIN_ITEMS_PER_BOX} distinct items clearly visible in EACH box (minimum total items visible: ${BOX_COUNT * MIN_ITEMS_PER_BOX})`,
-      "items should be separated enough to count visually (not hidden under tissue)",
-      "include some items peeking out for depth, but do not clutter the frame"
-    );
+      "items must be separated enough to count visually (not hidden under tissue paper)",
+      "some items can peek out for depth, but keep a premium uncluttered layout",
+      "avoid empty space that looks like missing items"
+    ];
 
     if (inputs.occasion === "Baby shower") {
-      MUST_INCLUDE.push("include at least TWO baby items clearly visible: onesie, baby bottle, pacifier, baby blanket, plush toy");
+      MUST_INCLUDE.push(
+        "include at least TWO baby items clearly visible: onesie, baby bottle, pacifier, baby blanket, plush toy"
+      );
     }
     if (inputs.recipient === "My Pet") {
       MUST_INCLUDE.push("include pet items clearly visible: pet treats, toy, collar or accessory");
     }
 
-    // Safety / quality negatives (and your “no empty/closed” guarantee)
+    // Safety / quality negatives (+ brand negatives)
     const NEGATIVE = [
-      "no empty boxes",
-      "no closed lids",
-      "no sealed packaging",
-      "no boxes without visible contents",
-      "no fully closed gift boxes",
-      "no minimalist empty packaging-only shots",
-      "no text",
+      ...BRAND_NEGATIVE,
       "no logos",
-      "no watermarks",
+      "no readable words on packaging",
       "no explicit content",
       "no alcohol",
       "no weapons",
@@ -252,40 +318,45 @@ module.exports = async (req, res) => {
       "no graphic violence"
     ];
 
-    // Add “avoid” rules from Notes
+    // Notes-based avoid constraints
     if (notesRules.avoid.length) {
       NEGATIVE.push(...notesRules.avoid);
     }
 
-    // Halloween: allow spooky/horror tone but keep it safe (no gore)
-    // (We already included this in OCCASION_MOTIFS["Halloween"] and NEGATIVE blocks.)
+    // If notes request horror, add extra guardrail
+    if (notesRules.horrorMode || inputs.occasion === "Halloween") {
+      NEGATIVE.push("no recognizable copyrighted characters");
+      NEGATIVE.push("no brand names or franchise logos");
+      NEGATIVE.push("no gore or graphic violence");
+    }
 
     const prompt = `
-Photorealistic product photography of a premium nested gift box set with items clearly visible.
+Photorealistic product photography of a premium nested gift box set with contents clearly visible.
 
 Occasion: ${inputs.occasion}
 Recipient: ${inputs.recipient}
 Vibe: ${inputs.vibe || "Not specified"}
 
+BRAND / STYLE (Meaningfull™ look):
+- ${BRAND_RULES.join("; ")}
+
 HARD CONSTRAINTS:
-- the gift box must be OPEN with the lid removed or pushed aside
-- items inside the boxes must be clearly visible at first glance
+- the gift boxes must be OPEN (lids removed or pushed aside)
+- contents must be clearly visible at first glance
 - ${MUST_INCLUDE.join("; ")}
 - ${occasionRulesArr.join("; ")}
 - ${recipientRulesArr.join("; ")}
 - ${vibeRulesArr.join("; ")}
-- ${notesRules.hard.length ? notesRules.hard.join("; ") : "use notes to meaningfully influence items when specific"}
-- tasteful, premium, ready-to-gift presentation
-- realistic lighting, realistic textures, studio/product photo look
+- ${notesRules.hard.length ? notesRules.hard.join("; ") : "use notes to meaningfully influence item selection when specific"}
 - show items that obviously communicate the occasion (not subtle)
 
 NEGATIVE CONSTRAINTS:
 - ${NEGATIVE.join(", ")}
 
-Notes (user text, treat as constraints when specific):
+Notes (user text; treat as constraints when specific):
 ${notesRules.raw || "None"}
 
-Social context (subtle influence only):
+Social context (subtle influence only; no logos):
 ${inputs.social || "None"}
 `.trim();
 
@@ -311,3 +382,4 @@ ${inputs.social || "None"}
     return res.status(500).json({ error: "Generation failed" });
   }
 };
+
