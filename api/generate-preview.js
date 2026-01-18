@@ -1,7 +1,21 @@
 // /api/generate-preview.js
-// Meaningfull™ AI Preview — MVP (Conditional Brands/Items from "Anything Else")
+// Meaningfull™ AI Preview — MVP (Robust Option-Set Key Mapping)
 // Engine: Replicate (Flux)
 // SAFE for Shopify + Vercel
+//
+// ✅ Fix: supports BOTH old + new OptionSet field titles (locked keys)
+//   Old labels:
+//     - "Who is this gift for?"
+//     - "What's their vibe?"
+//     - "Occasion"
+//     - "Anything Else"
+//     - "Social Links"
+//   New labels (IP-safe):
+//     - "Who’s this gift for?"
+//     - "What’s their vibe?"
+//     - "What’s the occasion?"
+//     - "Anything you’d like us to know?"
+//     - "Optional inspiration (links, profiles, or references)"
 
 const Replicate = require("replicate");
 
@@ -28,20 +42,137 @@ function toLower(s) {
   return normalizeStr(s).toLowerCase();
 }
 
+// Normalize smart quotes → straight quotes so label matching won’t break
+function normalizeKey(k) {
+  return normalizeStr(k)
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"');
+}
+
+/**
+ * Pull a value from a "properties" / "inputs" object using multiple possible keys.
+ * Supports:
+ * - exact keys
+ * - tolerant label variants
+ */
+function pickField(obj, keyCandidates = []) {
+  if (!obj || typeof obj !== "object") return "";
+
+  // direct hit (case-insensitive + smart quote normalized)
+  const map = new Map();
+  for (const [k, v] of Object.entries(obj)) {
+    map.set(normalizeKey(k), v);
+  }
+
+  for (const cand of keyCandidates) {
+    const v = map.get(normalizeKey(cand));
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+  }
+
+  // fallback: contains match (useful if apps append extra text)
+  const keys = Array.from(map.keys());
+  for (const cand of keyCandidates) {
+    const nc = normalizeKey(cand);
+    const hit = keys.find((k) => k.includes(nc));
+    if (hit) {
+      const v = map.get(hit);
+      if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Coerces whatever the frontend sends into the canonical inputs your prompt builder expects.
+ * Accepts either:
+ *  - req.body.inputs = { recipient, vibe, occasion, notes, social }
+ *  - OR req.body.inputs/properties = line-item style labels
+ */
+function coerceInputs(payloadInputs) {
+  const inputs = payloadInputs && typeof payloadInputs === "object" ? payloadInputs : {};
+
+  // If the frontend already sends canonical keys, honor them first.
+  const canonicalRecipient = inputs.recipient || inputs.to || inputs.for || "";
+  const canonicalVibe = inputs.vibe || "";
+  const canonicalOccasion = inputs.occasion || "";
+  const canonicalNotes = inputs.notes || inputs.anythingElse || "";
+  const canonicalSocial = inputs.social || inputs.socialLinks || inputs.links || "";
+
+  // If any canonical is present, keep it — otherwise derive from label-based keys.
+  const recipient =
+    normalizeStr(canonicalRecipient) ||
+    normalizeStr(
+      pickField(inputs, [
+        "Who's this gift for?",
+        "Who’s this gift for?",
+        "Who is this gift for?",
+        "Gift for",
+        "Recipient",
+        "To",
+      ])
+    );
+
+  const vibe =
+    normalizeStr(canonicalVibe) ||
+    normalizeStr(
+      pickField(inputs, [
+        "What's their vibe?",
+        "What’s their vibe?",
+        "Vibe",
+        "Their vibe",
+      ])
+    );
+
+  const occasion =
+    normalizeStr(canonicalOccasion) ||
+    normalizeStr(
+      pickField(inputs, [
+        "What's the occasion?",
+        "What’s the occasion?",
+        "Occasion",
+        "Event",
+      ])
+    );
+
+  const notes =
+    normalizeStr(canonicalNotes) ||
+    normalizeStr(
+      pickField(inputs, [
+        "Anything you'd like us to know?",
+        "Anything you’d like us to know?",
+        "Anything Else",
+        "Anything else",
+        "Notes",
+        "Special notes",
+      ])
+    );
+
+  const social =
+    normalizeStr(canonicalSocial) ||
+    normalizeStr(
+      pickField(inputs, [
+        "Optional inspiration (links, profiles, or references)",
+        "Optional inspiration",
+        "Social Links",
+        "Social links",
+        "Links",
+        "Inspiration",
+      ])
+    );
+
+  return { recipient, vibe, occasion, notes, social };
+}
+
 function inferRecipientGroup(recipient = "", notes = "") {
   const text = `${recipient} ${notes}`.toLowerCase();
 
-  const female = [
-    "wife","girlfriend","mom","mother","sister","daughter","girl",
-    "woman","women","her","she"
-  ];
-  const male = [
-    "husband","boyfriend","dad","father","brother","son","boy",
-    "man","men","him","he"
-  ];
+  const female = ["wife", "girlfriend", "mom", "mother", "sister", "daughter", "girl", "woman", "women", "her", "she"];
+  const male = ["husband", "boyfriend", "dad", "father", "brother", "son", "boy", "man", "men", "him", "he"];
 
-  const isFemale = female.some(k => text.includes(k));
-  const isMale = male.some(k => text.includes(k));
+  const isFemale = female.some((k) => text.includes(k));
+  const isMale = male.some((k) => text.includes(k));
 
   if (isFemale && !isMale) return "female";
   if (isMale && !isFemale) return "male";
@@ -49,19 +180,31 @@ function inferRecipientGroup(recipient = "", notes = "") {
 }
 
 function extractTimeFromNotes(notes = "") {
-  // captures 0:00–23:59 formats like 10:10, 9:45, 18:07
   const m = String(notes).match(/\b([01]?\d|2[0-3])[:.][0-5]\d\b/);
   if (!m) return null;
   return m[0].replace(".", ":");
 }
 
 function detectBrands(notesText) {
-  // Add/ remove brands anytime — this is just detection
   const BRANDS = [
-    "nike","adidas","puma","new balance",
-    "rolex","omega","cartier","seiko",
-    "apple","sony","bose",
-    "lululemon","chanel","dior","gucci","prada","ysl","hermes"
+    "nike",
+    "adidas",
+    "puma",
+    "new balance",
+    "rolex",
+    "omega",
+    "cartier",
+    "seiko",
+    "apple",
+    "sony",
+    "bose",
+    "lululemon",
+    "chanel",
+    "dior",
+    "gucci",
+    "prada",
+    "ysl",
+    "hermes",
   ];
 
   const found = [];
@@ -72,14 +215,12 @@ function detectBrands(notesText) {
 }
 
 function extractRequestedPhrases(notes = "") {
-  // Lightweight: split by commas/newlines and take short phrases
   const raw = String(notes || "");
   const parts = raw
     .split(/[,|\n]/g)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
-  // keep only up to 6 phrases to avoid over-constraining
   return parts.slice(0, 6);
 }
 
@@ -91,7 +232,6 @@ function buildPrompt({ inputs, tier }) {
   const requestedTime = extractTimeFromNotes(inputs.notes || "");
   const brandsFound = detectBrands(notesText);
 
-  // Brand mode ONLY when typed in Anything Else:
   const wantsBrandsOrLogos =
     brandsFound.length > 0 ||
     notesText.includes("logo") ||
@@ -104,60 +244,38 @@ function buildPrompt({ inputs, tier }) {
   const MUST_INCLUDE = [];
   const NEGATIVE = [];
 
-  // ---------- COLOR / STYLE BY RECIPIENT ----------
   const PALETTES = {
     female: "soft ivory, warm beige, blush-neutral accents, subtle gold or brass details",
     male: "charcoal, black, deep navy, warm gray, brushed metal accents",
-    neutral: "ivory, stone, warm gray, charcoal accents, minimal restrained tones"
+    neutral: "ivory, stone, warm gray, charcoal accents, minimal restrained tones",
   };
   MUST_INCLUDE.push(`apply a ${recipientGroup} premium palette: ${PALETTES[recipientGroup]}`);
 
-  // ================= DEFAULT SAFETY (UNBRANDED) =================
-  // Only allow logos/text when explicitly requested via Anything Else
   if (!wantsBrandsOrLogos) {
-    NEGATIVE.push(
-      "no logos",
-      "no brand names",
-      "no readable labels",
-      "no readable text"
-    );
+    NEGATIVE.push("no logos", "no brand names", "no readable labels", "no readable text");
   } else {
     MUST_INCLUDE.push(
       "include visible brand logos and specific branded items ONLY as requested in Notes",
       "logos should appear authentic and clean",
       "avoid random extra brands not requested"
     );
-    NEGATIVE.push(
-      "no watermarks",
-      "no UI elements"
-    );
+    NEGATIVE.push("no watermarks", "no UI elements");
   }
 
-  // ================= HARD DENY LIST (MINIMAL + VALUE) =================
-  // You said throws/blankets are fine — keep them allowed, but stop pillow-looking shapes.
   NEGATIVE.push(
-    // Always kills value / causes confusion
     "no pillows",
     "no cushions",
     "no pillow-shaped items",
     "no plush pillow forms",
     "no bulky square fabric bundles",
-
-    // Tiny low-value disposables
     "no sheet masks",
     "no mini or travel-size skincare",
     "no hand cream tubes",
-
-    // Cheap candle formats only (sets allowed)
     "no tea lights",
     "no votive candles",
-
-    // Paper clutter
     "no loose cards",
     "no posters",
     "no unbound prints",
-
-    // Visual junk
     "no excessive small items",
     "no decorative padding"
   );
@@ -170,18 +288,14 @@ function buildPrompt({ inputs, tier }) {
     "throws or blankets allowed only if folded/draped as a thin premium textile accent, not dominant and not pillow-like"
   );
 
-  // ================= SIGNATURE: MULTI-BOX DEPTH =================
   if (isSignature) {
     MUST_INCLUDE.push(
       "show a nested 3-tier gift box presentation: top box open, middle box partially visible, bottom box hinted",
       "clearly show multiple boxes and layered depth (not a single box only)"
     );
-    NEGATIVE.push(
-      "no single-box-only composition"
-    );
+    NEGATIVE.push("no single-box-only composition");
   }
 
-  // ================= SIGNATURE HERO =================
   if (isSignature) {
     MUST_INCLUDE.push(
       "include ONE dominant modern sculptural lifestyle object as the hero (ceramic, stone, resin, metal, or leather)",
@@ -197,7 +311,6 @@ function buildPrompt({ inputs, tier }) {
     );
   }
 
-  // ================= ALLOWED ITEMS YOU WANTED (CONTROLLED) =================
   MUST_INCLUDE.push(
     "gift shop trinkets are allowed if premium-looking; limit to ONE small accent item; avoid cheap plastic",
     "candle sets are allowed; maximum two candles; substantial vessels; premium materials; not tea lights or votives",
@@ -206,20 +319,14 @@ function buildPrompt({ inputs, tier }) {
   );
   NEGATIVE.push("no closed cosmetic bags", "no zipped cosmetic pouches");
 
-  // ================= SPECIFIC ITEMS FROM NOTES (ONLY WHEN TYPED) =================
-  // If user typed specific items/brands in Anything Else, push those into MUST_INCLUDE
   if (requestedPhrases.length) {
-    MUST_INCLUDE.push(
-      `include specific requested items from Notes when feasible: ${requestedPhrases.join("; ")}`
-    );
+    MUST_INCLUDE.push(`include specific requested items from Notes when feasible: ${requestedPhrases.join("; ")}`);
   }
 
-  // If brands were detected, reinforce them explicitly
   if (brandsFound.length) {
     MUST_INCLUDE.push(`explicit brand requests detected: ${brandsFound.join(", ")} (only include these if shown)`);
   }
 
-  // Watch/time handling: only if Notes include "watch/timepiece" OR a time
   const wantsWatch = notesText.includes("watch") || notesText.includes("timepiece") || !!requestedTime;
   if (wantsWatch) {
     MUST_INCLUDE.push(
@@ -230,14 +337,10 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no smartwatches unless requested");
 
     if (requestedTime) {
-      MUST_INCLUDE.push(
-        `watch must show the exact time ${requestedTime}`,
-        "make the watch face large and clearly readable"
-      );
+      MUST_INCLUDE.push(`watch must show the exact time ${requestedTime}`, "make the watch face large and clearly readable");
     }
   }
 
-  // ================= FINAL PROMPT =================
   return `
 High-end photorealistic studio product photography of a premium AI-curated gift box experience with contents clearly visible.
 
@@ -274,8 +377,8 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { inputs, sessionId, tier = "Curated" } = req.body || {};
-    if (!inputs || !sessionId) {
+    const { inputs: rawInputs, sessionId, tier = "Curated" } = req.body || {};
+    if (!rawInputs || !sessionId) {
       return res.status(400).json({ error: "Missing inputs or sessionId" });
     }
 
@@ -284,19 +387,19 @@ module.exports = async (req, res) => {
       return res.status(429).json({ error: "Generation limit reached" });
     }
 
+    // ✅ Canonicalize inputs from either canonical keys OR label-based keys
+    const inputs = coerceInputs(rawInputs);
+
     const prompt = buildPrompt({ inputs, tier });
 
-    const output = await replicate.run(
-      process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev",
-      {
-        input: {
-          prompt,
-          aspect_ratio: "1:1",
-          output_format: "webp",
-          quality: 90,
-        },
-      }
-    );
+    const output = await replicate.run(process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev", {
+      input: {
+        prompt,
+        aspect_ratio: "1:1",
+        output_format: "webp",
+        quality: 90,
+      },
+    });
 
     const imageUrl = Array.isArray(output) ? output[0] : output;
     generationCount.set(sessionId, used + 1);
