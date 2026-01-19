@@ -1,18 +1,20 @@
+```js
 // /api/generate-preview.js
-// Meaningfull™ AI Preview — MVP (Robust Option-Set Key Mapping + Notes Focus Mode)
+// Meaningfull™ AI Preview — MVP (Robust Option-Set Key Mapping + Canonical Notes Parsing)
 // Engine: Replicate (Flux)
 // SAFE for Shopify + Vercel
 //
 // ✅ Supports BOTH old + new OptionSet field titles (locked keys)
 // ✅ Notes ("Anything you'd like us to know?") now supports:
-//    - Explicit exclusions: "no candles", "don't include socks", "exclude skincare"
-//    - Focus mode: explicit inclusions/items/brands in Notes become PRIMARY driver
+//    - Canonical AVOID items (robust): "don't include candles 14 years old" => candles
+//    - Canonical MUST INCLUDE items (robust): "nike hat" => hat (focus mode)
+//    - Focus Mode: if MUST INCLUDE is detected, composition centers on it
 // ✅ Optional brand constraints via env vars (MVP-safe)
 //
 // Env (optional):
 // - REPLICATE_API_TOKEN
 // - REPLICATE_MODEL (default: black-forest-labs/flux-dev)
-// - MEANINGFULL_ALLOWED_BRANDS="nike,adidas,bose"   (empty => default no brands/logos in strict mode)
+// - MEANINGFULL_ALLOWED_BRANDS="nike,adidas,bose"   (empty => strict mode = no brands/logos)
 // - MEANINGFULL_DISALLOWED_BRANDS="rolex,gucci"
 // - MEANINGFULL_STRICT_BRAND_MODE="true"            (default true)
 
@@ -115,7 +117,6 @@ function coerceInputs(payloadInputs) {
   const canonicalNotes = inputs.notes || inputs.anythingElse || "";
   const canonicalSocial = inputs.social || inputs.socialLinks || inputs.links || "";
 
-  // If any canonical is present, keep it — otherwise derive from label-based keys.
   const recipient =
     normalizeStr(canonicalRecipient) ||
     normalizeStr(
@@ -210,6 +211,7 @@ function detectBrands(notesText) {
     "adidas",
     "puma",
     "new balance",
+    "reebok",
     "rolex",
     "omega",
     "cartier",
@@ -242,79 +244,141 @@ function detectBrands(notesText) {
   return { requested, permitted, blocked };
 }
 
-function extractRequestedPhrases(notes = "") {
-  const raw = String(notes || "");
-  const parts = raw
-    .split(/[,|\n]/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
+// ================= CANONICAL ITEM TAXONOMY =================
 
-  return parts.slice(0, 6);
-}
+// Human-friendly label for prompt injection
+const INCLUDE_LABEL = {
+  watch: "premium wristwatch/timepiece (analog unless requested otherwise)",
+  wallet: "premium wallet or card holder",
+  jewelry: "premium jewelry (necklace/bracelet/ring/earrings as appropriate)",
+  sneakers: "premium sneakers/shoes (clean, elevated)",
+  hoodie: "premium hoodie/sweatshirt",
+  sweater: "premium sweater/knit",
+  jacket: "premium jacket/outerwear accent",
+  hat: "premium hat/cap/beanie (structured, elevated)",
+  headphones: "premium headphones/earbuds",
+  speaker: "premium speaker (minimal, modern)",
+  bag: "premium bag (tote/handbag/backpack as appropriate)",
+  sunglasses: "premium sunglasses",
+  belt: "premium belt",
+  scarf: "premium scarf",
+  book: "book (premium edition aesthetic)",
+  journal: "journal/notebook (minimal, premium)",
+  mug: "ceramic mug/cup (premium, minimal)",
+  bottle: "premium tumbler/water bottle",
+  decor: "modern sculptural decor object (ceramic/stone/metal)",
+  tech_accessory: "tech accessory (charging dock/phone accessory; minimal; no text)",
+  fitness: "fitness accessory (premium, minimal; no cheap plastic)",
+  travel: "travel accessory (passport cover/luggage tag; minimal; no text)",
+};
+
+// High-signal items users WANT to see (Focus Mode drivers)
+const CANONICAL_INCLUDE = {
+  watch: ["watch", "timepiece", "analog watch"],
+  wallet: ["wallet", "card holder", "cardholder"],
+  jewelry: ["jewelry", "necklace", "bracelet", "ring", "earrings"],
+  sneakers: ["sneakers", "sneaker", "shoes", "shoe", "trainers"],
+  hoodie: ["hoodie", "sweatshirt"],
+  sweater: ["sweater", "knit"],
+  jacket: ["jacket", "coat", "outerwear"],
+  hat: ["hat", "cap", "beanie"],
+  headphones: ["headphones", "earbuds", "earphones", "airpods"],
+  speaker: ["speaker", "bluetooth speaker"],
+  bag: ["bag", "handbag", "tote", "backpack"],
+  sunglasses: ["sunglasses", "shades"],
+  belt: ["belt"],
+  scarf: ["scarf"],
+  book: ["book", "novel"],
+  journal: ["journal", "notebook"],
+  mug: ["mug", "cup"],
+  bottle: ["water bottle", "tumbler"],
+  decor: ["decor", "sculpture", "ceramic object", "vase", "tray", "bowl"],
+  tech_accessory: ["charger", "charging dock", "phone accessory"],
+  fitness: ["gym", "workout", "fitness", "yoga"],
+  travel: ["travel", "luggage tag", "passport cover"],
+};
+
+// Items that frequently KILL conversion (hard exclusions)
+const CANONICAL_AVOID = {
+  candles: ["candle", "candles", "tealight", "tealights", "votive", "wax"],
+  skincare: ["skincare", "serum", "lotion", "face mask", "sheet mask", "moisturizer", "hand cream", "cream"],
+  fragrance: ["fragrance", "perfume", "cologne"],
+  socks: ["socks"],
+  hats: ["hat", "cap", "beanie"], // allows "don't include hats" to block hats
+  plush: ["plush", "stuffed", "stuffed animal"],
+  pillow: ["pillow", "cushion"],
+  blanket: ["blanket", "throw"],
+  soap: ["soap", "body wash"],
+  bath: ["bath bomb", "bath bombs", "loofah"],
+  alcohol: ["alcohol", "wine", "beer", "spirits"],
+  food: ["food", "snack", "snacks", "candy", "chocolate"],
+  paper: ["card", "greeting card", "poster", "print", "prints", "sticker", "stickers"],
+  clutter: ["cheap", "plastic", "novelty", "gag gift"],
+};
 
 /**
- * Explicit exclusions: "no candles", "don't include socks", "exclude skincare", "without fragrance"
- * Returns array of phrases (lowercased).
+ * Extract canonical MUST INCLUDE + AVOID tags from Notes.
+ * - Avoids are ONLY triggered by explicit exclusion language ("no X", "don't include X", etc.)
+ * - Includes can be triggered by explicit inclusion language OR list-style notes
  */
-function extractExplicitExclusions(notes = "") {
+function extractCanonicalTags(notes = "") {
   const text = String(notes || "").toLowerCase();
 
-  const patterns = [
-    /\bno\s+([a-z\s-]{3,30})/g,
-    /\bdon'?t\s+include\s+([a-z\s-]{3,30})/g,
-    /\bexclude\s+([a-z\s-]{3,30})/g,
-    /\bwithout\s+([a-z\s-]{3,30})/g,
+  const includes = new Set();
+  const avoids = new Set();
+
+  // --- AVOID detection (explicit language only) ---
+  const exclusionPatterns = [
+    /\bno\s+([a-z\s-]{3,60})/g,
+    /\bdon'?t\s+include\s+([a-z\s-]{3,60})/g,
+    /\bexclude\s+([a-z\s-]{3,60})/g,
+    /\bwithout\s+([a-z\s-]{3,60})/g,
   ];
 
-  const found = new Set();
-
-  for (const re of patterns) {
-    let match;
-    while ((match = re.exec(text)) !== null) {
-      const item = match[1].replace(/[^a-z\s-]/g, "").trim();
-      if (item.length >= 3) found.add(item);
-    }
-  }
-
-  return Array.from(found).slice(0, 8);
-}
-
-/**
- * Explicit inclusions / focus:
- * - "must include X", "include X", "add X", "focus on X", "want X", "looking for X"
- * PLUS list-style comma/newline phrases as "possible includes".
- */
-function extractExplicitInclusions(notes = "") {
-  const text = String(notes || "");
-
-  const patterns = [
-    /\bmust\s+include\s+([^.\n]{3,80})/gi,
-    /\binclude\s+([^.\n]{3,80})/gi,
-    /\badd\s+([^.\n]{3,80})/gi,
-    /\bfocus\s+on\s+([^.\n]{3,80})/gi,
-    /\bwant\s+([^.\n]{3,80})/gi,
-    /\blooking\s+for\s+([^.\n]{3,80})/gi,
-  ];
-
-  const found = [];
-
-  for (const re of patterns) {
+  const exclusionPhrases = [];
+  for (const re of exclusionPatterns) {
     let m;
-    while ((m = re.exec(text)) !== null) {
-      found.push(m[1]);
+    while ((m = re.exec(text)) !== null) exclusionPhrases.push(m[1]);
+  }
+
+  for (const phrase of exclusionPhrases) {
+    for (const [key, synonyms] of Object.entries(CANONICAL_AVOID)) {
+      if (synonyms.some((s) => phrase.includes(s))) avoids.add(key);
     }
   }
 
-  const listStyle = extractRequestedPhrases(text);
+  // --- INCLUDE detection (explicit include OR list style) ---
+  const inclusionPatterns = [
+    /\bmust\s+include\s+([^.\n]{3,120})/gi,
+    /\binclude\s+([^.\n]{3,120})/gi,
+    /\badd\s+([^.\n]{3,120})/gi,
+    /\bfocus\s+on\s+([^.\n]{3,120})/gi,
+    /\bwant\s+([^.\n]{3,120})/gi,
+    /\blooking\s+for\s+([^.\n]{3,120})/gi,
+  ];
 
-  const merged = []
-    .concat(found)
-    .concat(listStyle)
-    .map((s) => String(s).trim())
-    .filter(Boolean)
-    .slice(0, 8);
+  const inclusionPhrases = [];
 
-  return merged;
+  for (const re of inclusionPatterns) {
+    let m;
+    while ((m = re.exec(text)) !== null) inclusionPhrases.push(m[1]);
+  }
+
+  // list-style: "nike hat, no candles, 14 years old"
+  // (This helps pick up "hat" even without "include".)
+  const listStyle = text.split(/[,|\n]/g).map((s) => s.trim());
+  inclusionPhrases.push(...listStyle);
+
+  for (const phrase of inclusionPhrases) {
+    for (const [key, synonyms] of Object.entries(CANONICAL_INCLUDE)) {
+      if (synonyms.some((s) => phrase.includes(s))) includes.add(key);
+    }
+  }
+
+  return {
+    includes: Array.from(includes).slice(0, 6),
+    avoids: Array.from(avoids).slice(0, 6),
+  };
 }
 
 // ================= PROMPT BUILDER =================
@@ -324,20 +388,15 @@ function buildPrompt({ inputs, tier }) {
   const recipientGroup = inferRecipientGroup(inputs.recipient || "", inputs.notes || "");
   const requestedTime = extractTimeFromNotes(inputs.notes || "");
 
+  // Canonical Notes parsing (the main upgrade)
+  const canonical = extractCanonicalTags(inputs.notes || "");
+  const avoidSet = new Set(canonical.avoids.map((x) => String(x).toLowerCase()));
+  const hasUserSpecificFocus = canonical.includes.length > 0;
+
+  // Brand logic
   const brandScan = detectBrands(notesText);
   const permittedBrands = brandScan.permitted || [];
   const blockedBrands = brandScan.blocked || [];
-
-  const requestedPhrases = extractRequestedPhrases(inputs.notes || "");
-  const explicitExclusions = extractExplicitExclusions(inputs.notes || "");
-  const explicitInclusions = extractExplicitInclusions(inputs.notes || "");
-
-  // Exclusions win if a phrase matches exactly
-  const exclusionsSet = new Set(explicitExclusions.map((s) => s.toLowerCase()));
-  const inclusionsFiltered = explicitInclusions.filter((s) => !exclusionsSet.has(String(s).toLowerCase()));
-
-  // Focus mode triggers if Notes has specific inclusions OR brand requests
-  const hasUserSpecificFocus = inclusionsFiltered.length > 0 || permittedBrands.length > 0;
 
   const requestedBrandWords =
     notesText.includes("logo") ||
@@ -346,12 +405,13 @@ function buildPrompt({ inputs, tier }) {
     notesText.includes("branded");
 
   const wantsBrandsOrLogos = CONSTRAINTS.STRICT_BRAND_MODE
-    ? permittedBrands.length > 0 // strict: must have permitted explicit requests
-    : permittedBrands.length > 0 || requestedBrandWords; // loose: allow if user asks generally and we have any permitted
+    ? permittedBrands.length > 0
+    : permittedBrands.length > 0 || requestedBrandWords;
 
   const MUST_INCLUDE = [];
   const NEGATIVE = [];
 
+  // Palette steering
   const PALETTES = {
     female: "soft ivory, warm beige, blush-neutral accents, subtle gold or brass details",
     male: "charcoal, black, deep navy, warm gray, brushed metal accents",
@@ -359,7 +419,7 @@ function buildPrompt({ inputs, tier }) {
   };
   MUST_INCLUDE.push(`apply a ${recipientGroup} premium palette: ${PALETTES[recipientGroup]}`);
 
-  // Branding / text control
+  // Text/logo control
   if (!wantsBrandsOrLogos) {
     NEGATIVE.push("no logos", "no brand names", "no readable labels", "no readable text", "no typography");
   } else {
@@ -371,13 +431,13 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no watermarks", "no UI elements", "no extra brand logos");
   }
 
-  // If user requested blocked brands, explicitly forbid them
+  // Blocked brands must be explicitly forbidden
   if (blockedBrands.length) {
     NEGATIVE.push(`no ${blockedBrands.join(" brand, no ")} brand`);
     NEGATIVE.push("no luxury designer branding unless explicitly permitted");
   }
 
-  // Default hard negatives (your current block)
+  // Global hard negatives (your original intent)
   NEGATIVE.push(
     "no pillows",
     "no cushions",
@@ -404,7 +464,7 @@ function buildPrompt({ inputs, tier }) {
     "throws or blankets allowed only if folded/draped as a thin premium textile accent, not dominant and not pillow-like"
   );
 
-  // Tier composition blueprint
+  // Tier blueprint
   if (isSignature) {
     MUST_INCLUDE.push(
       "show a nested 3-tier gift box presentation: top box open, middle box partially visible, bottom box hinted",
@@ -421,36 +481,65 @@ function buildPrompt({ inputs, tier }) {
       "no cluttered assortment of small consumables"
     );
   } else {
-    // Curated (default) blueprint: clearer composition target
     MUST_INCLUDE.push("show one premium gift box open with contents clearly visible; 3–6 items max; strong negative space");
     NEGATIVE.push("no cluttered overflowing box");
   }
 
-  // Allowed items guidance (kept, but Focus Mode can tighten)
+  // Allowed-item guidance BUT overridden by canonical avoids
   MUST_INCLUDE.push(
     "gift shop trinkets are allowed if premium-looking; limit to ONE small accent item; avoid cheap plastic",
-    "candle sets are allowed; maximum two candles; substantial vessels; premium materials; not tea lights or votives",
     "bath bombs or lip balm allowed only as a single small secondary accent when appropriate; must not dominate",
     "soft cosmetic bags allowed only if OPEN with contents visible (no closed or zipped bags)"
   );
   NEGATIVE.push("no closed cosmetic bags", "no zipped cosmetic pouches");
 
-  // Notes list-style phrases should be prioritized (stronger than before)
-  if (requestedPhrases.length) {
-    MUST_INCLUDE.push(`user-requested items from Notes should be included and prioritized: ${requestedPhrases.join("; ")}`);
+  // Candles: only allow if NOT excluded
+  if (!avoidSet.has("candles")) {
+    MUST_INCLUDE.push(
+      "candle sets are allowed; maximum two candles; substantial vessels; premium materials; not tea lights or votives"
+    );
+  } else {
+    NEGATIVE.push("no candles", "no candle-like objects", "no wax items");
   }
 
-  // Brand summary (constrained)
-  if (permittedBrands.length) {
-    MUST_INCLUDE.push(`permitted brand requests: ${permittedBrands.join(", ")} (include ONLY these, if shown)`);
+  // Skincare/fragrance: strengthen if excluded
+  if (avoidSet.has("skincare")) {
+    NEGATIVE.push("no skincare", "no lotions", "no creams", "no serums", "no masks");
   }
-  if (blockedBrands.length) {
-    MUST_INCLUDE.push(`blocked brand requests detected (DO NOT include): ${blockedBrands.join(", ")}`);
+  if (avoidSet.has("fragrance")) {
+    NEGATIVE.push("no fragrance", "no perfume", "no cologne");
+  }
+  if (avoidSet.has("socks")) {
+    NEGATIVE.push("no socks");
+  }
+  if (avoidSet.has("hats")) {
+    NEGATIVE.push("no hats", "no caps", "no beanies");
+  }
+  if (avoidSet.has("plush")) {
+    NEGATIVE.push("no plush", "no stuffed animals");
+  }
+  if (avoidSet.has("pillow")) {
+    NEGATIVE.push("no pillows", "no cushions");
+  }
+  if (avoidSet.has("blanket")) {
+    NEGATIVE.push("no blankets", "no throws");
+  }
+  if (avoidSet.has("paper")) {
+    NEGATIVE.push("no greeting cards", "no paper inserts", "no posters", "no prints");
+  }
+  if (avoidSet.has("alcohol")) {
+    NEGATIVE.push("no alcohol", "no wine", "no spirits");
+  }
+  if (avoidSet.has("food")) {
+    NEGATIVE.push("no food", "no snacks", "no candy", "no chocolate");
+  }
+  if (avoidSet.has("clutter")) {
+    NEGATIVE.push("no cheap plastic", "no novelty items", "no gag gifts");
   }
 
-  // Watch logic
+  // Watch logic (but respect canonical avoid if user excluded watches via phrase)
   const wantsWatch = notesText.includes("watch") || notesText.includes("timepiece") || !!requestedTime;
-  if (wantsWatch) {
+  if (wantsWatch && !notesText.includes("don't include watch") && !notesText.includes("no watch")) {
     MUST_INCLUDE.push(
       "include a premium wristwatch/timepiece as a visible item",
       "watch should be shown in an open presentation case or tray",
@@ -463,38 +552,33 @@ function buildPrompt({ inputs, tier }) {
     }
   }
 
-  // Focus Mode: when Notes contains specific items/brands, center the composition around them
+  // Focus Mode: MUST INCLUDE items become primary driver
   if (hasUserSpecificFocus) {
-    if (inclusionsFiltered.length) {
-      MUST_INCLUDE.push(
-        `PRIMARY FOCUS: the gift composition must center around these user-requested items/brands from Notes: ${inclusionsFiltered.join(
-          "; "
-        )}`,
-        "do not substitute with random alternatives if the requested items can be shown",
-        "any non-requested items must be minimal, generic, and secondary",
-        "avoid filler items that dilute the requested focus"
-      );
-    } else {
-      MUST_INCLUDE.push(
-        "PRIMARY FOCUS: center composition tightly on the user-requested specifics from Notes (avoid generic filler)"
-      );
-    }
+    const focusItems = canonical.includes.map((k) => INCLUDE_LABEL[k] || k);
+    MUST_INCLUDE.push(
+      `PRIMARY FOCUS ITEMS (from Notes): ${focusItems.join("; ")}`,
+      "center the composition around these items",
+      "any non-requested items must be minimal, generic, and secondary",
+      "avoid filler items that dilute the requested focus"
+    );
+    NEGATIVE.push("no random extra categories not requested", "no unrelated novelty items");
 
     if (wantsBrandsOrLogos) {
       MUST_INCLUDE.push("if a brand is explicitly requested in Notes and permitted, show only that brand (no extra brands)");
       NEGATIVE.push("no additional brands beyond the requested/permitted set");
     }
-
-    NEGATIVE.push("no random extra categories not requested", "no unrelated novelty items");
   }
 
-  // Explicit user exclusions are strict and override defaults (including candle allowance etc.)
-  if (explicitExclusions.length) {
-    explicitExclusions.forEach((item) => {
-      NEGATIVE.push(`no ${item}`);
-    });
-    MUST_INCLUDE.push("user-specified exclusions are strict and must be followed exactly");
+  // Brand summary (constrained)
+  if (permittedBrands.length) {
+    MUST_INCLUDE.push(`permitted brand requests: ${permittedBrands.join(", ")} (include ONLY these, if shown)`);
   }
+  if (blockedBrands.length) {
+    MUST_INCLUDE.push(`blocked brand requests detected (DO NOT include): ${blockedBrands.join(", ")}`);
+  }
+
+  // Final hard steer: prevent Flux text
+  MUST_INCLUDE.push("no readable text anywhere unless explicitly requested");
 
   return `
 High-end photorealistic studio product photography of a premium AI-curated gift box experience with contents clearly visible.
@@ -510,7 +594,6 @@ STYLE:
 - intentional composition with negative space
 - realistic materials and textures
 - avoid random clutter
-- no readable text anywhere unless explicitly requested
 
 MUST INCLUDE:
 - ${MUST_INCLUDE.join("; ")}
@@ -518,7 +601,7 @@ MUST INCLUDE:
 NEGATIVE CONSTRAINTS:
 - ${NEGATIVE.join(", ")}
 
-Notes (user intent; treat exclusions as strict and inclusions as primary focus when specific):
+Notes (user intent; canonical MUST INCLUDE becomes primary focus; explicit AVOID is strict):
 ${inputs.notes || "None"}
 `.trim();
 }
@@ -571,4 +654,5 @@ module.exports = async (req, res) => {
     res.status(500).json({ error: "Generation failed" });
   }
 };
+```
 
