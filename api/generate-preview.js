@@ -7,16 +7,17 @@
 // ✅ Supports BOTH old + new OptionSet field titles (locked keys)
 // ✅ Notes ("Anything you'd like us to know?") now supports:
 //    - Canonical AVOID items (robust): "don't include candles 14 years old" => candles
-//    - Canonical MUST INCLUDE items (robust): "nike hat" => hat (focus mode)
+//    - Canonical MUST INCLUDE items (robust): "reebok hat" => hat (focus mode)
 //    - Focus Mode: if MUST INCLUDE is detected, composition centers on it
 // ✅ Optional brand constraints via env vars (MVP-safe)
+// ✅ Improved error handling: returns clear JSON errors instead of silent failures
 //
 // Env (optional):
 // - REPLICATE_API_TOKEN
 // - REPLICATE_MODEL (default: black-forest-labs/flux-dev)
-// - MEANINGFULL_ALLOWED_BRANDS="nike,adidas,bose"   (empty => strict mode = no brands/logos)
+// - MEANINGFULL_ALLOWED_BRANDS="nike,adidas,bose"
 // - MEANINGFULL_DISALLOWED_BRANDS="rolex,gucci"
-// - MEANINGFULL_STRICT_BRAND_MODE="true"            (default true)
+// - MEANINGFULL_STRICT_BRAND_MODE="true" (default true)
 
 const Replicate = require("replicate");
 
@@ -245,8 +246,6 @@ function detectBrands(notesText) {
 }
 
 // ================= CANONICAL ITEM TAXONOMY =================
-
-// Human-friendly label for prompt injection
 const INCLUDE_LABEL = {
   watch: "premium wristwatch/timepiece (analog unless requested otherwise)",
   wallet: "premium wallet or card holder",
@@ -272,7 +271,6 @@ const INCLUDE_LABEL = {
   travel: "travel accessory (passport cover/luggage tag; minimal; no text)",
 };
 
-// High-signal items users WANT to see (Focus Mode drivers)
 const CANONICAL_INCLUDE = {
   watch: ["watch", "timepiece", "analog watch"],
   wallet: ["wallet", "card holder", "cardholder"],
@@ -298,13 +296,12 @@ const CANONICAL_INCLUDE = {
   travel: ["travel", "luggage tag", "passport cover"],
 };
 
-// Items that frequently KILL conversion (hard exclusions)
 const CANONICAL_AVOID = {
   candles: ["candle", "candles", "tealight", "tealights", "votive", "wax"],
   skincare: ["skincare", "serum", "lotion", "face mask", "sheet mask", "moisturizer", "hand cream", "cream"],
   fragrance: ["fragrance", "perfume", "cologne"],
   socks: ["socks"],
-  hats: ["hat", "cap", "beanie"], // allows "don't include hats" to block hats
+  hats: ["hat", "cap", "beanie"],
   plush: ["plush", "stuffed", "stuffed animal"],
   pillow: ["pillow", "cushion"],
   blanket: ["blanket", "throw"],
@@ -316,18 +313,13 @@ const CANONICAL_AVOID = {
   clutter: ["cheap", "plastic", "novelty", "gag gift"],
 };
 
-/**
- * Extract canonical MUST INCLUDE + AVOID tags from Notes.
- * - Avoids are ONLY triggered by explicit exclusion language ("no X", "don't include X", etc.)
- * - Includes can be triggered by explicit inclusion language OR list-style notes
- */
 function extractCanonicalTags(notes = "") {
   const text = String(notes || "").toLowerCase();
 
   const includes = new Set();
   const avoids = new Set();
 
-  // --- AVOID detection (explicit language only) ---
+  // AVOID detection (explicit only)
   const exclusionPatterns = [
     /\bno\s+([a-z\s-]{3,60})/g,
     /\bdon'?t\s+include\s+([a-z\s-]{3,60})/g,
@@ -347,7 +339,7 @@ function extractCanonicalTags(notes = "") {
     }
   }
 
-  // --- INCLUDE detection (explicit include OR list style) ---
+  // INCLUDE detection (explicit OR list-style)
   const inclusionPatterns = [
     /\bmust\s+include\s+([^.\n]{3,120})/gi,
     /\binclude\s+([^.\n]{3,120})/gi,
@@ -364,8 +356,6 @@ function extractCanonicalTags(notes = "") {
     while ((m = re.exec(text)) !== null) inclusionPhrases.push(m[1]);
   }
 
-  // list-style: "nike hat, no candles, 14 years old"
-  // (This helps pick up "hat" even without "include".)
   const listStyle = text.split(/[,|\n]/g).map((s) => s.trim());
   inclusionPhrases.push(...listStyle);
 
@@ -388,7 +378,6 @@ function buildPrompt({ inputs, tier }) {
   const recipientGroup = inferRecipientGroup(inputs.recipient || "", inputs.notes || "");
   const requestedTime = extractTimeFromNotes(inputs.notes || "");
 
-  // Canonical Notes parsing (the main upgrade)
   const canonical = extractCanonicalTags(inputs.notes || "");
   const avoidSet = new Set(canonical.avoids.map((x) => String(x).toLowerCase()));
   const hasUserSpecificFocus = canonical.includes.length > 0;
@@ -411,7 +400,6 @@ function buildPrompt({ inputs, tier }) {
   const MUST_INCLUDE = [];
   const NEGATIVE = [];
 
-  // Palette steering
   const PALETTES = {
     female: "soft ivory, warm beige, blush-neutral accents, subtle gold or brass details",
     male: "charcoal, black, deep navy, warm gray, brushed metal accents",
@@ -431,13 +419,12 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no watermarks", "no UI elements", "no extra brand logos");
   }
 
-  // Blocked brands must be explicitly forbidden
   if (blockedBrands.length) {
     NEGATIVE.push(`no ${blockedBrands.join(" brand, no ")} brand`);
     NEGATIVE.push("no luxury designer branding unless explicitly permitted");
   }
 
-  // Global hard negatives (your original intent)
+  // Global hard negatives
   NEGATIVE.push(
     "no pillows",
     "no cushions",
@@ -485,7 +472,7 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no cluttered overflowing box");
   }
 
-  // Allowed-item guidance BUT overridden by canonical avoids
+  // Allowed guidance (overridden by avoids)
   MUST_INCLUDE.push(
     "gift shop trinkets are allowed if premium-looking; limit to ONE small accent item; avoid cheap plastic",
     "bath bombs or lip balm allowed only as a single small secondary accent when appropriate; must not dominate",
@@ -493,7 +480,7 @@ function buildPrompt({ inputs, tier }) {
   );
   NEGATIVE.push("no closed cosmetic bags", "no zipped cosmetic pouches");
 
-  // Candles: only allow if NOT excluded
+  // Candles conditional
   if (!avoidSet.has("candles")) {
     MUST_INCLUDE.push(
       "candle sets are allowed; maximum two candles; substantial vessels; premium materials; not tea lights or votives"
@@ -502,44 +489,22 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no candles", "no candle-like objects", "no wax items");
   }
 
-  // Skincare/fragrance: strengthen if excluded
-  if (avoidSet.has("skincare")) {
-    NEGATIVE.push("no skincare", "no lotions", "no creams", "no serums", "no masks");
-  }
-  if (avoidSet.has("fragrance")) {
-    NEGATIVE.push("no fragrance", "no perfume", "no cologne");
-  }
-  if (avoidSet.has("socks")) {
-    NEGATIVE.push("no socks");
-  }
-  if (avoidSet.has("hats")) {
-    NEGATIVE.push("no hats", "no caps", "no beanies");
-  }
-  if (avoidSet.has("plush")) {
-    NEGATIVE.push("no plush", "no stuffed animals");
-  }
-  if (avoidSet.has("pillow")) {
-    NEGATIVE.push("no pillows", "no cushions");
-  }
-  if (avoidSet.has("blanket")) {
-    NEGATIVE.push("no blankets", "no throws");
-  }
-  if (avoidSet.has("paper")) {
-    NEGATIVE.push("no greeting cards", "no paper inserts", "no posters", "no prints");
-  }
-  if (avoidSet.has("alcohol")) {
-    NEGATIVE.push("no alcohol", "no wine", "no spirits");
-  }
-  if (avoidSet.has("food")) {
-    NEGATIVE.push("no food", "no snacks", "no candy", "no chocolate");
-  }
-  if (avoidSet.has("clutter")) {
-    NEGATIVE.push("no cheap plastic", "no novelty items", "no gag gifts");
-  }
+  // Canonical avoid expansions
+  if (avoidSet.has("skincare")) NEGATIVE.push("no skincare", "no lotions", "no creams", "no serums", "no masks");
+  if (avoidSet.has("fragrance")) NEGATIVE.push("no fragrance", "no perfume", "no cologne");
+  if (avoidSet.has("socks")) NEGATIVE.push("no socks");
+  if (avoidSet.has("hats")) NEGATIVE.push("no hats", "no caps", "no beanies");
+  if (avoidSet.has("plush")) NEGATIVE.push("no plush", "no stuffed animals");
+  if (avoidSet.has("pillow")) NEGATIVE.push("no pillows", "no cushions");
+  if (avoidSet.has("blanket")) NEGATIVE.push("no blankets", "no throws");
+  if (avoidSet.has("paper")) NEGATIVE.push("no greeting cards", "no paper inserts", "no posters", "no prints");
+  if (avoidSet.has("alcohol")) NEGATIVE.push("no alcohol", "no wine", "no spirits");
+  if (avoidSet.has("food")) NEGATIVE.push("no food", "no snacks", "no candy", "no chocolate");
+  if (avoidSet.has("clutter")) NEGATIVE.push("no cheap plastic", "no novelty items", "no gag gifts");
 
-  // Watch logic (but respect canonical avoid if user excluded watches via phrase)
+  // Watch logic
   const wantsWatch = notesText.includes("watch") || notesText.includes("timepiece") || !!requestedTime;
-  if (wantsWatch && !notesText.includes("don't include watch") && !notesText.includes("no watch")) {
+  if (wantsWatch) {
     MUST_INCLUDE.push(
       "include a premium wristwatch/timepiece as a visible item",
       "watch should be shown in an open presentation case or tray",
@@ -569,7 +534,6 @@ function buildPrompt({ inputs, tier }) {
     }
   }
 
-  // Brand summary (constrained)
   if (permittedBrands.length) {
     MUST_INCLUDE.push(`permitted brand requests: ${permittedBrands.join(", ")} (include ONLY these, if shown)`);
   }
@@ -577,7 +541,6 @@ function buildPrompt({ inputs, tier }) {
     MUST_INCLUDE.push(`blocked brand requests detected (DO NOT include): ${blockedBrands.join(", ")}`);
   }
 
-  // Final hard steer: prevent Flux text
   MUST_INCLUDE.push("no readable text anywhere unless explicitly requested");
 
   return `
@@ -606,7 +569,7 @@ ${inputs.notes || "None"}
 `.trim();
 }
 
-// ================= HANDLER =================
+// ================= HANDLER (Improved Errors) =================
 module.exports = async (req, res) => {
   setCors(res);
 
@@ -616,6 +579,10 @@ module.exports = async (req, res) => {
   }
 
   try {
+    if (!process.env.REPLICATE_API_TOKEN) {
+      return res.status(500).json({ error: "Missing REPLICATE_API_TOKEN in environment" });
+    }
+
     const { inputs: rawInputs, sessionId, tier = "Curated" } = req.body || {};
     if (!rawInputs || !sessionId) {
       return res.status(400).json({ error: "Missing inputs or sessionId" });
@@ -626,24 +593,49 @@ module.exports = async (req, res) => {
       return res.status(429).json({ error: "Generation limit reached" });
     }
 
-    // ✅ Canonicalize inputs from either canonical keys OR label-based keys
     const inputs = coerceInputs(rawInputs);
-
     const prompt = buildPrompt({ inputs, tier });
 
-    const output = await replicate.run(process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev", {
-      input: {
-        prompt,
-        aspect_ratio: "1:1",
-        output_format: "webp",
-        quality: 90,
-      },
-    });
+    const model = process.env.REPLICATE_MODEL || "black-forest-labs/flux-dev";
 
-    const imageUrl = Array.isArray(output) ? output[0] : output;
+    let output;
+    try {
+      output = await replicate.run(model, {
+        input: {
+          prompt,
+          aspect_ratio: "1:1",
+          output_format: "webp",
+          quality: 90,
+        },
+      });
+    } catch (e) {
+      console.error("Replicate.run error:", e);
+      return res.status(502).json({
+        error: "Replicate request failed",
+        details: e?.message || String(e),
+      });
+    }
+
+    let imageUrl = null;
+    if (typeof output === "string") imageUrl = output;
+    else if (Array.isArray(output) && output.length) imageUrl = output[0];
+    else if (output && typeof output === "object") {
+      if (Array.isArray(output.output) && output.output.length) imageUrl = output.output[0];
+      if (!imageUrl && Array.isArray(output.images) && output.images.length) imageUrl = output.images[0];
+      if (!imageUrl && typeof output.url === "string") imageUrl = output.url;
+    }
+
+    if (!imageUrl || typeof imageUrl !== "string") {
+      console.error("No imageUrl in replicate output:", output);
+      return res.status(502).json({
+        error: "No image returned from model",
+        details: "Replicate returned an unexpected/empty output",
+      });
+    }
+
     generationCount.set(sessionId, used + 1);
 
-    res.status(200).json({
+    return res.status(200).json({
       ok: true,
       tier,
       used: used + 1,
@@ -651,8 +643,10 @@ module.exports = async (req, res) => {
     });
   } catch (err) {
     console.error("Preview generation failed:", err);
-    res.status(500).json({ error: "Generation failed" });
+    return res.status(500).json({
+      error: "Generation failed",
+      details: err?.message || String(err),
+    });
   }
 };
 ```
-
