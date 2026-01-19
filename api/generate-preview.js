@@ -1,11 +1,13 @@
-```js
 // /api/generate-preview.js
-// Meaningfull™ AI Preview — MVP (Robust Option-Set Key Mapping + Canonical Notes Parsing)
+// Meaningfull(TM) AI Preview — MVP (Robust Option-Set Key Mapping + Canonical Notes Parsing)
 // Engine: Replicate (Flux)
 // SAFE for Shopify + Vercel
 //
+// IMPORTANT: This file intentionally uses ZERO template literals (no backticks)
+// to avoid Vercel/Editor copy-paste issues causing SyntaxError with `${...}`.
+//
 // ✅ Supports BOTH old + new OptionSet field titles (locked keys)
-// ✅ Notes ("Anything you'd like us to know?") now supports:
+// ✅ Notes ("Anything you'd like us to know?") supports:
 //    - Canonical AVOID items (robust): "don't include candles 14 years old" => candles
 //    - Canonical MUST INCLUDE items (robust): "reebok hat" => hat (focus mode)
 //    - Focus Mode: if MUST INCLUDE is detected, composition centers on it
@@ -33,16 +35,15 @@ const generationCount = new Map();
 const CONSTRAINTS = {
   ALLOWED_BRANDS: (process.env.MEANINGFULL_ALLOWED_BRANDS || "")
     .split(",")
-    .map((s) => s.trim().toLowerCase())
+    .map((s) => String(s || "").trim().toLowerCase())
     .filter(Boolean),
 
   DISALLOWED_BRANDS: (process.env.MEANINGFULL_DISALLOWED_BRANDS || "")
     .split(",")
-    .map((s) => s.trim().toLowerCase())
+    .map((s) => String(s || "").trim().toLowerCase())
     .filter(Boolean),
 
-  // If true: NEVER allow brands/logos unless explicitly requested AND permitted.
-  STRICT_BRAND_MODE: (process.env.MEANINGFULL_STRICT_BRAND_MODE || "true").toLowerCase() === "true",
+  STRICT_BRAND_MODE: String(process.env.MEANINGFULL_STRICT_BRAND_MODE || "true").toLowerCase() === "true",
 };
 
 // ================= CORS =================
@@ -60,7 +61,7 @@ function toLower(s) {
   return normalizeStr(s).toLowerCase();
 }
 
-// Normalize smart quotes → straight quotes so label matching won’t break
+// Normalize smart quotes -> straight quotes so label matching won’t break
 function normalizeKey(k) {
   return normalizeStr(k)
     .toLowerCase()
@@ -74,23 +75,22 @@ function normalizeKey(k) {
  * - exact keys
  * - tolerant label variants
  */
-function pickField(obj, keyCandidates = []) {
+function pickField(obj, keyCandidates) {
   if (!obj || typeof obj !== "object") return "";
+  const cands = Array.isArray(keyCandidates) ? keyCandidates : [];
 
-  // direct hit (case-insensitive + smart quote normalized)
   const map = new Map();
   for (const [k, v] of Object.entries(obj)) {
     map.set(normalizeKey(k), v);
   }
 
-  for (const cand of keyCandidates) {
+  for (const cand of cands) {
     const v = map.get(normalizeKey(cand));
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
   }
 
-  // fallback: contains match (useful if apps append extra text)
   const keys = Array.from(map.keys());
-  for (const cand of keyCandidates) {
+  for (const cand of cands) {
     const nc = normalizeKey(cand);
     const hit = keys.find((k) => k.includes(nc));
     if (hit) {
@@ -103,15 +103,11 @@ function pickField(obj, keyCandidates = []) {
 }
 
 /**
- * Coerces whatever the frontend sends into the canonical inputs your prompt builder expects.
- * Accepts either:
- *  - req.body.inputs = { recipient, vibe, occasion, notes, social }
- *  - OR req.body.inputs/properties = line-item style labels
+ * Coerces whatever the frontend sends into canonical inputs.
  */
 function coerceInputs(payloadInputs) {
   const inputs = payloadInputs && typeof payloadInputs === "object" ? payloadInputs : {};
 
-  // If the frontend already sends canonical keys, honor them first.
   const canonicalRecipient = inputs.recipient || inputs.to || inputs.for || "";
   const canonicalVibe = inputs.vibe || "";
   const canonicalOccasion = inputs.occasion || "";
@@ -182,8 +178,8 @@ function coerceInputs(payloadInputs) {
   return { recipient, vibe, occasion, notes, social };
 }
 
-function inferRecipientGroup(recipient = "", notes = "") {
-  const text = `${recipient} ${notes}`.toLowerCase();
+function inferRecipientGroup(recipient, notes) {
+  const text = (String(recipient || "") + " " + String(notes || "")).toLowerCase();
 
   const female = ["wife", "girlfriend", "mom", "mother", "sister", "daughter", "girl", "woman", "women", "her", "she"];
   const male = ["husband", "boyfriend", "dad", "father", "brother", "son", "boy", "man", "men", "him", "he"];
@@ -196,17 +192,17 @@ function inferRecipientGroup(recipient = "", notes = "") {
   return "neutral";
 }
 
-function extractTimeFromNotes(notes = "") {
-  const m = String(notes).match(/\b([01]?\d|2[0-3])[:.][0-5]\d\b/);
+function extractTimeFromNotes(notes) {
+  const m = String(notes || "").match(/\b([01]?\d|2[0-3])[:.][0-5]\d\b/);
   if (!m) return null;
-  return m[0].replace(".", ":");
+  return String(m[0]).replace(".", ":");
 }
 
 /**
  * Brand detection from notes (NOT permission).
  * Returns requested/permitted/blocked using CONSTRAINTS.
  */
-function detectBrands(notesText) {
+function detectBrands(notesTextLower) {
   const BRANDS = [
     "nike",
     "adidas",
@@ -231,10 +227,10 @@ function detectBrands(notesText) {
 
   const found = [];
   for (const b of BRANDS) {
-    if (notesText.includes(b)) found.push(b);
+    if (notesTextLower.includes(b)) found.push(b);
   }
 
-  const requested = [...new Set(found)];
+  const requested = Array.from(new Set(found));
 
   const disallowed = new Set(CONSTRAINTS.DISALLOWED_BRANDS);
   const allowed = new Set(CONSTRAINTS.ALLOWED_BRANDS);
@@ -313,7 +309,7 @@ const CANONICAL_AVOID = {
   clutter: ["cheap", "plastic", "novelty", "gag gift"],
 };
 
-function extractCanonicalTags(notes = "") {
+function extractCanonicalTags(notes) {
   const text = String(notes || "").toLowerCase();
 
   const includes = new Set();
@@ -350,7 +346,6 @@ function extractCanonicalTags(notes = "") {
   ];
 
   const inclusionPhrases = [];
-
   for (const re of inclusionPatterns) {
     let m;
     while ((m = re.exec(text)) !== null) inclusionPhrases.push(m[1]);
@@ -372,9 +367,12 @@ function extractCanonicalTags(notes = "") {
 }
 
 // ================= PROMPT BUILDER =================
-function buildPrompt({ inputs, tier }) {
-  const isSignature = String(tier || "").toLowerCase().includes("signature");
-  const notesText = toLower(inputs.notes || "");
+function buildPrompt(opts) {
+  const inputs = (opts && opts.inputs) || {};
+  const tier = (opts && opts.tier) || "Curated";
+
+  const isSignature = String(tier).toLowerCase().includes("signature");
+  const notesTextLower = toLower(inputs.notes || "");
   const recipientGroup = inferRecipientGroup(inputs.recipient || "", inputs.notes || "");
   const requestedTime = extractTimeFromNotes(inputs.notes || "");
 
@@ -383,15 +381,15 @@ function buildPrompt({ inputs, tier }) {
   const hasUserSpecificFocus = canonical.includes.length > 0;
 
   // Brand logic
-  const brandScan = detectBrands(notesText);
+  const brandScan = detectBrands(notesTextLower);
   const permittedBrands = brandScan.permitted || [];
   const blockedBrands = brandScan.blocked || [];
 
   const requestedBrandWords =
-    notesText.includes("logo") ||
-    notesText.includes("logos") ||
-    notesText.includes("brand") ||
-    notesText.includes("branded");
+    notesTextLower.includes("logo") ||
+    notesTextLower.includes("logos") ||
+    notesTextLower.includes("brand") ||
+    notesTextLower.includes("branded");
 
   const wantsBrandsOrLogos = CONSTRAINTS.STRICT_BRAND_MODE
     ? permittedBrands.length > 0
@@ -405,7 +403,7 @@ function buildPrompt({ inputs, tier }) {
     male: "charcoal, black, deep navy, warm gray, brushed metal accents",
     neutral: "ivory, stone, warm gray, charcoal accents, minimal restrained tones",
   };
-  MUST_INCLUDE.push(`apply a ${recipientGroup} premium palette: ${PALETTES[recipientGroup]}`);
+  MUST_INCLUDE.push("apply a " + recipientGroup + " premium palette: " + PALETTES[recipientGroup]);
 
   // Text/logo control
   if (!wantsBrandsOrLogos) {
@@ -420,7 +418,7 @@ function buildPrompt({ inputs, tier }) {
   }
 
   if (blockedBrands.length) {
-    NEGATIVE.push(`no ${blockedBrands.join(" brand, no ")} brand`);
+    NEGATIVE.push("no " + blockedBrands.join(" brand, no ") + " brand");
     NEGATIVE.push("no luxury designer branding unless explicitly permitted");
   }
 
@@ -503,7 +501,7 @@ function buildPrompt({ inputs, tier }) {
   if (avoidSet.has("clutter")) NEGATIVE.push("no cheap plastic", "no novelty items", "no gag gifts");
 
   // Watch logic
-  const wantsWatch = notesText.includes("watch") || notesText.includes("timepiece") || !!requestedTime;
+  const wantsWatch = notesTextLower.includes("watch") || notesTextLower.includes("timepiece") || !!requestedTime;
   if (wantsWatch) {
     MUST_INCLUDE.push(
       "include a premium wristwatch/timepiece as a visible item",
@@ -513,15 +511,15 @@ function buildPrompt({ inputs, tier }) {
     NEGATIVE.push("no smartwatches unless requested");
 
     if (requestedTime) {
-      MUST_INCLUDE.push(`watch must show the exact time ${requestedTime}`, "make the watch face large and clearly readable");
+      MUST_INCLUDE.push("watch must show the exact time " + requestedTime, "make the watch face large and clearly readable");
     }
   }
 
-  // Focus Mode: MUST INCLUDE items become primary driver
+  // Focus Mode
   if (hasUserSpecificFocus) {
     const focusItems = canonical.includes.map((k) => INCLUDE_LABEL[k] || k);
     MUST_INCLUDE.push(
-      `PRIMARY FOCUS ITEMS (from Notes): ${focusItems.join("; ")}`,
+      "PRIMARY FOCUS ITEMS (from Notes): " + focusItems.join("; "),
       "center the composition around these items",
       "any non-requested items must be minimal, generic, and secondary",
       "avoid filler items that dilute the requested focus"
@@ -535,38 +533,39 @@ function buildPrompt({ inputs, tier }) {
   }
 
   if (permittedBrands.length) {
-    MUST_INCLUDE.push(`permitted brand requests: ${permittedBrands.join(", ")} (include ONLY these, if shown)`);
+    MUST_INCLUDE.push("permitted brand requests: " + permittedBrands.join(", ") + " (include ONLY these, if shown)");
   }
   if (blockedBrands.length) {
-    MUST_INCLUDE.push(`blocked brand requests detected (DO NOT include): ${blockedBrands.join(", ")}`);
+    MUST_INCLUDE.push("blocked brand requests detected (DO NOT include): " + blockedBrands.join(", "));
   }
 
   MUST_INCLUDE.push("no readable text anywhere unless explicitly requested");
 
-  return `
-High-end photorealistic studio product photography of a premium AI-curated gift box experience with contents clearly visible.
+  const lines = [];
+  lines.push("High-end photorealistic studio product photography of a premium AI-curated gift box experience with contents clearly visible.");
+  lines.push("");
+  lines.push("Tier: " + tier);
+  lines.push("Recipient: " + (inputs.recipient || ""));
+  lines.push("Occasion: " + (inputs.occasion || ""));
+  lines.push("Vibe: " + (inputs.vibe || "Refined"));
+  lines.push("");
+  lines.push("STYLE:");
+  lines.push("- modern premium lifestyle aesthetic");
+  lines.push("- editorial product photography");
+  lines.push("- intentional composition with negative space");
+  lines.push("- realistic materials and textures");
+  lines.push("- avoid random clutter");
+  lines.push("");
+  lines.push("MUST INCLUDE:");
+  lines.push("- " + MUST_INCLUDE.join("; "));
+  lines.push("");
+  lines.push("NEGATIVE CONSTRAINTS:");
+  lines.push("- " + NEGATIVE.join(", "));
+  lines.push("");
+  lines.push("Notes (user intent; canonical MUST INCLUDE becomes primary focus; explicit AVOID is strict):");
+  lines.push(inputs.notes || "None");
 
-Tier: ${tier}
-Recipient: ${inputs.recipient}
-Occasion: ${inputs.occasion}
-Vibe: ${inputs.vibe || "Refined"}
-
-STYLE:
-- modern premium lifestyle aesthetic
-- editorial product photography
-- intentional composition with negative space
-- realistic materials and textures
-- avoid random clutter
-
-MUST INCLUDE:
-- ${MUST_INCLUDE.join("; ")}
-
-NEGATIVE CONSTRAINTS:
-- ${NEGATIVE.join(", ")}
-
-Notes (user intent; canonical MUST INCLUDE becomes primary focus; explicit AVOID is strict):
-${inputs.notes || "None"}
-`.trim();
+  return lines.join("\n").trim();
 }
 
 // ================= HANDLER (Improved Errors) =================
@@ -583,7 +582,11 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: "Missing REPLICATE_API_TOKEN in environment" });
     }
 
-    const { inputs: rawInputs, sessionId, tier = "Curated" } = req.body || {};
+    const body = req.body || {};
+    const rawInputs = body.inputs;
+    const sessionId = body.sessionId;
+    const tier = body.tier || "Curated";
+
     if (!rawInputs || !sessionId) {
       return res.status(400).json({ error: "Missing inputs or sessionId" });
     }
@@ -602,7 +605,7 @@ module.exports = async (req, res) => {
     try {
       output = await replicate.run(model, {
         input: {
-          prompt,
+          prompt: prompt,
           aspect_ratio: "1:1",
           output_format: "webp",
           quality: 90,
@@ -612,7 +615,7 @@ module.exports = async (req, res) => {
       console.error("Replicate.run error:", e);
       return res.status(502).json({
         error: "Replicate request failed",
-        details: e?.message || String(e),
+        details: (e && e.message) ? e.message : String(e),
       });
     }
 
@@ -637,16 +640,15 @@ module.exports = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      tier,
+      tier: tier,
       used: used + 1,
-      imageUrl,
+      imageUrl: imageUrl,
     });
   } catch (err) {
     console.error("Preview generation failed:", err);
     return res.status(500).json({
       error: "Generation failed",
-      details: err?.message || String(err),
+      details: (err && err.message) ? err.message : String(err),
     });
   }
 };
-```
